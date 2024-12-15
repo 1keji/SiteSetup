@@ -2,30 +2,69 @@
 
 # 确保脚本以 root 权限运行
 if [[ $EUID -ne 0 ]]; then
-   echo "此脚本必须以 root 权限运行" 
+   echo "此脚本必须以 root 权限运行"
    exit 1
 fi
 
-# 添加 ondrej/php PPA
-add_ppa() {
-    if ! grep -q "^deb .*$" /etc/apt/sources.list.d/ondrej-ubuntu-php-*.list 2>/dev/null; then
-        apt update
-        apt install -y software-properties-common
-        add-apt-repository ppa:ondrej/php -y
-        apt update
+# 检测操作系统类型
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        VERSION=$VERSION_ID
+    else
+        echo "无法检测操作系统。"
+        exit 1
     fi
+}
+
+# 添加相应的 PHP 仓库
+add_repository() {
+    case "$OS" in
+        ubuntu)
+            echo "检测到 Ubuntu 系统，添加 ondrej/php PPA..."
+            if ! grep -q "^deb .*$" /etc/apt/sources.list.d/ondrej-ubuntu-php-*.list 2>/dev/null; then
+                apt update
+                apt install -y software-properties-common
+                add-apt-repository ppa:ondrej/php -y
+                if [[ $? -ne 0 ]]; then
+                    echo "添加 ondrej/php PPA 失败。请手动检查。"
+                    exit 1
+                fi
+                apt update
+            else
+                echo "ondrej/php PPA 已存在，跳过添加。"
+            fi
+            ;;
+        debian)
+            echo "检测到 Debian 系统，添加 Debian Sury 仓库..."
+            if ! grep -q "^deb .*$" /etc/apt/sources.list.d/php.list 2>/dev/null; then
+                apt update
+                apt install -y apt-transport-https lsb-release ca-certificates wget gnupg
+                wget -qO- https://packages.sury.org/php/apt.gpg | gpg --dearmor | tee /etc/apt/keyrings/php-archive-keyring.gpg >/dev/null
+                echo "deb [signed-by=/etc/apt/keyrings/php-archive-keyring.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php.list
+                apt update
+            else
+                echo "Debian Sury 仓库已存在，跳过添加。"
+            fi
+            ;;
+        *)
+            echo "不支持的操作系统: $OS"
+            exit 1
+            ;;
+    esac
 }
 
 # 获取可用的 PHP 版本
 get_available_php_versions() {
-    available_versions=("7.4" "8.0" "8.1" "8.2")
+    available_versions=("7.4" "8.0" "8.1" "8.2" "8.3")
 }
 
 # 获取已安装的 PHP 版本
 get_installed_php_versions() {
     installed_versions=()
     for ver in "${available_versions[@]}"; do
-        if dpkg -l | grep -q "php$ver "; then
+        if dpkg -l | grep -q "php$ver " ; then
             installed_versions+=("$ver")
         fi
     done
@@ -35,12 +74,12 @@ get_installed_php_versions() {
 main_menu() {
     while true; do
         echo "=============================="
-        echo " PHP 管理脚本"
+        echo "        PHP 管理脚本"
         echo "=============================="
-        echo "0. 退出脚本"
         echo "1. 安装 PHP"
         echo "2. 管理 PHP"
         echo "3. 卸载 PHP 版本"
+        echo "0. 退出脚本"
         echo "=============================="
         read -p "请输入选项: " choice
         case $choice in
@@ -71,12 +110,12 @@ install_php_menu() {
     for i in "${!available_versions[@]}"; do
         echo "$((i+1)). PHP ${available_versions[i]}"
     done
-    echo "$(( ${#available_versions[@]} +1 )). 返回主菜单"
+    echo "$(( ${#available_versions[@]} +1 ))). 返回主菜单"
     read -p "请选择要安装的 PHP 版本（可以多选，用空格分隔）: " -a selections
     for sel in "${selections[@]}"; do
         if [[ "$sel" -ge 1 && "$sel" -le "${#available_versions[@]}" ]]; then
             version="${available_versions[$((sel-1))]}"
-            if dpkg -l | grep -q "php$version "; then
+            if dpkg -l | grep -q "php$version " ; then
                 echo "PHP $version 已经安装，跳过。"
             else
                 echo "正在安装 PHP $version..."
@@ -129,7 +168,7 @@ manage_php_extensions() {
     skipped=()
     for ext in "${extensions[@]}"; do
         ext_trimmed=$(echo "$ext" | xargs) # 去除空格
-        if dpkg -l | grep -q "php$version-$ext_trimmed "; then
+        if dpkg -l | grep -q "php$version-$ext_trimmed " ; then
             skipped+=("$ext_trimmed")
         else
             echo "正在安装扩展: $ext_trimmed ..."
@@ -188,7 +227,8 @@ uninstall_php_menu() {
 
 # 初始化
 initialize() {
-    add_ppa
+    detect_os
+    add_repository
 }
 
 # 执行初始化并进入主菜单
