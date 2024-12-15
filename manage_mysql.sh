@@ -167,6 +167,241 @@ function add_database() {
     fi
 }
 
+# 修改数据库信息
+function modify_database_info() {
+    # 检查 MySQL 容器是否运行
+    if ! docker ps | grep -q "$MYSQL_CONTAINER_NAME"
+    then
+        echo "MySQL 容器未运行，请先安装并启动 MySQL。"
+        return
+    fi
+
+    read -s -p "请输入 MySQL root 用户密码: " root_password
+    echo
+    if [[ -z "$root_password" ]]; then
+        echo "未输入 root 密码，操作已取消。"
+        return
+    fi
+
+    # 获取所有数据库列表，排除系统数据库
+    databases=$(docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "SHOW DATABASES;" | grep -Ev "Database|information_schema|performance_schema|mysql|sys")
+
+    if [[ -z "$databases" ]]; then
+        echo "没有可修改的数据库。"
+        return
+    fi
+
+    echo "可修改的数据库列表："
+    select db in $databases "取消"
+    do
+        if [[ "$db" == "取消" ]]; then
+            echo "操作已取消。"
+            return
+        elif [[ -n "$db" ]]; then
+            selected_db="$db"
+            break
+        else
+            echo "无效的选择，请重新选择。"
+        fi
+    done
+
+    echo "请选择要修改的项："
+    echo "1. 修改数据库名称"
+    echo "2. 修改用户名"
+    echo "3. 修改用户密码"
+    echo "4. 同时修改数据库名称、用户名和密码"
+    echo "0. 返回"
+    read -p "选择: " modify_choice
+
+    case $modify_choice in
+        1)
+            # 修改数据库名称
+            read -p "请输入新的数据库名称: " new_db
+            if [[ -z "$new_db" ]]; then
+                echo "未输入新数据库名称，操作已取消。"
+                return
+            fi
+
+            # 检查 MySQL 版本以决定是否支持 RENAME DATABASE
+            mysql_version=$(docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "SELECT VERSION();" | awk 'NR==2 {print $1}')
+            required_version="8.0.23"
+            if [[ "$(printf '%s\n' "$required_version" "$mysql_version" | sort -V | head -n1)" == "$required_version" && "$mysql_version" != "$required_version" ]]; then
+                # MySQL 支持 RENAME DATABASE
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "RENAME DATABASE \`${selected_db}\` TO \`${new_db}\`;"
+                if [ $? -eq 0 ]; then
+                    echo "数据库 '${selected_db}' 重命名为 '${new_db}' 成功。"
+                else
+                    echo "重命名数据库失败。"
+                fi
+            else
+                # 不支持直接重命名，采用导出导入方式
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysqldump -uroot -p${root_password} ${selected_db} > /tmp/${selected_db}.sql
+                if [ $? -ne 0 ]; then
+                    echo "导出数据库 '${selected_db}' 失败。"
+                    return
+                fi
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "CREATE DATABASE \`${new_db}\`;"
+                if [ $? -ne 0 ]; then
+                    echo "创建新数据库 '${new_db}' 失败。"
+                    rm -f /tmp/${selected_db}.sql
+                    return
+                fi
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} ${new_db} < /tmp/${selected_db}.sql
+                if [ $? -ne 0 ]; then
+                    echo "导入数据到新数据库 '${new_db}' 失败。"
+                    docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "DROP DATABASE \`${new_db}\`;"
+                    rm -f /tmp/${selected_db}.sql
+                    return
+                fi
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "DROP DATABASE \`${selected_db}\`;"
+                rm -f /tmp/${selected_db}.sql
+                if [ $? -eq 0 ]; then
+                    echo "数据库 '${selected_db}' 重命名为 '${new_db}' 成功。"
+                else
+                    echo "重命名数据库失败。"
+                fi
+            fi
+            ;;
+        2)
+            # 修改用户名
+            read -p "请输入要修改的用户名: " old_user
+            if [[ -z "$old_user" ]]; then
+                echo "未输入用户名，操作已取消。"
+                return
+            fi
+
+            read -p "请输入新的用户名: " new_user
+            if [[ -z "$new_user" ]]; then
+                echo "未输入新用户名，操作已取消。"
+                return
+            fi
+
+            docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "RENAME USER '${old_user}'@'%' TO '${new_user}'@'%';"
+            if [ $? -eq 0 ]; then
+                echo "用户名从 '${old_user}' 修改为 '${new_user}' 成功。"
+            else
+                echo "修改用户名失败。请确保旧用户名存在且新用户名未被使用。"
+            fi
+            ;;
+        3)
+            # 修改用户密码
+            read -p "请输入要修改密码的用户名: " user
+            if [[ -z "$user" ]]; then
+                echo "未输入用户名，操作已取消。"
+                return
+            fi
+
+            read -s -p "请输入新的密码: " new_password
+            echo
+            if [[ -z "$new_password" ]]; then
+                echo "未输入新密码，操作已取消。"
+                return
+            fi
+
+            docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "ALTER USER '${user}'@'%' IDENTIFIED BY '${new_password}'; FLUSH PRIVILEGES;"
+            if [ $? -eq 0 ]; then
+                echo "用户 '${user}' 的密码修改成功。"
+            else
+                echo "修改密码失败。请确保用户名存在。"
+            fi
+            ;;
+        4)
+            # 同时修改数据库名称、用户名和密码
+            # 修改数据库名称
+            read -p "请输入新的数据库名称: " new_db
+            if [[ -z "$new_db" ]]; then
+                echo "未输入新数据库名称，操作已取消。"
+                return
+            fi
+
+            # 修改用户名
+            read -p "请输入要修改的用户名: " old_user
+            if [[ -z "$old_user" ]]; then
+                echo "未输入用户名，操作已取消。"
+                return
+            fi
+
+            read -p "请输入新的用户名: " new_user
+            if [[ -z "$new_user" ]]; then
+                echo "未输入新用户名，操作已取消。"
+                return
+            fi
+
+            # 修改用户密码
+            read -s -p "请输入新的密码: " new_password
+            echo
+            if [[ -z "$new_password" ]]; then
+                echo "未输入新密码，操作已取消。"
+                return
+            fi
+
+            # 进行数据库重命名
+            mysql_version=$(docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "SELECT VERSION();" | awk 'NR==2 {print $1}')
+            required_version="8.0.23"
+            if [[ "$(printf '%s\n' "$required_version" "$mysql_version" | sort -V | head -n1)" == "$required_version" && "$mysql_version" != "$required_version" ]]; then
+                # MySQL 支持 RENAME DATABASE
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "RENAME DATABASE \`${selected_db}\` TO \`${new_db}\`;"
+                if [ $? -eq 0 ]; then
+                    echo "数据库 '${selected_db}' 重命名为 '${new_db}' 成功。"
+                else
+                    echo "重命名数据库失败。"
+                    return
+                fi
+            else
+                # 不支持直接重命名，采用导出导入方式
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysqldump -uroot -p${root_password} ${selected_db} > /tmp/${selected_db}.sql
+                if [ $? -ne 0 ]; then
+                    echo "导出数据库 '${selected_db}' 失败。"
+                    return
+                fi
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "CREATE DATABASE \`${new_db}\`;"
+                if [ $? -ne 0 ]; then
+                    echo "创建新数据库 '${new_db}' 失败。"
+                    rm -f /tmp/${selected_db}.sql
+                    return
+                fi
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} ${new_db} < /tmp/${selected_db}.sql
+                if [ $? -ne 0 ]; then
+                    echo "导入数据到新数据库 '${new_db}' 失败。"
+                    docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "DROP DATABASE \`${new_db}\`;"
+                    rm -f /tmp/${selected_db}.sql
+                    return
+                fi
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "DROP DATABASE \`${selected_db}\`;"
+                rm -f /tmp/${selected_db}.sql
+                if [ $? -eq 0 ]; then
+                    echo "数据库 '${selected_db}' 重命名为 '${new_db}' 成功。"
+                else
+                    echo "重命名数据库失败。"
+                    return
+                fi
+            fi
+
+            # 修改用户名
+            docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "RENAME USER '${old_user}'@'%' TO '${new_user}'@'%';"
+            if [ $? -eq 0 ]; then
+                echo "用户名从 '${old_user}' 修改为 '${new_user}' 成功。"
+            else
+                echo "修改用户名失败。请确保旧用户名存在且新用户名未被使用。"
+            fi
+
+            # 修改用户密码
+            docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "ALTER USER '${new_user}'@'%' IDENTIFIED BY '${new_password}'; FLUSH PRIVILEGES;"
+            if [ $? -eq 0 ]; then
+                echo "用户 '${new_user}' 的密码修改成功。"
+            else
+                echo "修改密码失败。请确保用户名存在。"
+            fi
+            ;;
+        0)
+            return
+            ;;
+        *)
+            echo "无效的选择。"
+            ;;
+    esac
+}
+
 # 管理数据库
 function manage_database() {
     # 检查 MySQL 容器是否运行
@@ -179,7 +414,7 @@ function manage_database() {
     echo "请选择操作："
     echo "1. 查看所有数据库"
     echo "2. 删除数据库"
-    echo "3. 重命名数据库"
+    echo "3. 修改数据库信息"
     echo "0. 返回主菜单"
     read -p "选择: " manage_choice
 
@@ -205,54 +440,7 @@ function manage_database() {
             fi
             ;;
         3)
-            read -p "请输入要重命名的数据库名称: " old_db
-            read -p "请输入新数据库名称: " new_db
-            if [[ -z "$old_db" || -z "$new_db" ]]; then
-                echo "输入不完整，操作已取消。"
-                return
-            fi
-            read -s -p "请输入 MySQL root 用户密码: " root_password
-            echo
-            # 检查 MySQL 版本以决定是否支持 RENAME DATABASE
-            mysql_version=$(docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "SELECT VERSION();" | awk 'NR==2 {print $1}')
-            # 比较版本
-            required_version="8.0.23"
-            if [[ "$(printf '%s\n' "$required_version" "$mysql_version" | sort -V | head -n1)" == "$required_version" && "$mysql_version" != "$required_version" ]]; then
-                # MySQL 支持 RENAME DATABASE
-                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "RENAME DATABASE \`${old_db}\` TO \`${new_db}\`;"
-                if [ $? -eq 0 ]; then
-                    echo "数据库 '${old_db}' 重命名为 '${new_db}' 成功。"
-                else
-                    echo "重命名数据库失败。"
-                fi
-            else
-                # 不支持直接重命名，采用导出导入方式
-                docker exec -i "$MYSQL_CONTAINER_NAME" mysqldump -uroot -p${root_password} ${old_db} > /tmp/${old_db}.sql
-                if [ $? -ne 0 ]; then
-                    echo "导出数据库 '${old_db}' 失败。"
-                    return
-                fi
-                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "CREATE DATABASE \`${new_db}\`;"
-                if [ $? -ne 0 ]; then
-                    echo "创建新数据库 '${new_db}' 失败。"
-                    rm -f /tmp/${old_db}.sql
-                    return
-                fi
-                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} ${new_db} < /tmp/${old_db}.sql
-                if [ $? -ne 0 ]; then
-                    echo "导入数据到新数据库 '${new_db}' 失败。"
-                    docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "DROP DATABASE \`${new_db}\`;"
-                    rm -f /tmp/${old_db}.sql
-                    return
-                fi
-                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "DROP DATABASE \`${old_db}\`;"
-                rm -f /tmp/${old_db}.sql
-                if [ $? -eq 0 ]; then
-                    echo "数据库 '${old_db}' 重命名为 '${new_db}' 成功。"
-                else
-                    echo "重命名数据库失败。"
-                fi
-            fi
+            modify_database_info
             ;;
         0)
             return
