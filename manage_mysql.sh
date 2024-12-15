@@ -10,7 +10,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 # 全局变量
-MYSQL_ROOT_PASSWORD="root"  # 默认 MySQL root 密码，可根据需要修改
+DEFAULT_MYSQL_ROOT_PASSWORD="root"  # 默认 MySQL root 密码，可根据需要修改
 
 # 函数：安装 MySQL
 install_mysql() {
@@ -39,25 +39,66 @@ install_mysql() {
 
   # 安装依赖项
   echo "安装依赖项..."
-  apt install -y wget lsb-release gnupg
+  apt install -y wget lsb-release gnupg debconf-utils
 
-  # 添加 MySQL APT 仓库
-  echo "添加 MySQL APT 仓库..."
-  wget https://dev.mysql.com/get/mysql-apt-config_${MYSQL_VERSION}-1_all.deb
-  dpkg -i mysql-apt-config_${MYSQL_VERSION}-1_all.deb
+  # 下载最新的 MySQL APT 配置包
+  echo "下载 MySQL APT 配置包..."
+  wget https://dev.mysql.com/get/mysql-apt-config_latest_all.deb -O /tmp/mysql-apt-config_latest_all.deb
+
+  if [ ! -f /tmp/mysql-apt-config_latest_all.deb ]; then
+    echo "下载 MySQL APT 配置包失败。请检查网络连接或 URL 是否正确。"
+    return
+  fi
+
+  # 预先配置 debconf 以选择 MySQL 版本
+  echo "预先配置 MySQL APT 配置选项..."
+  echo "mysql-apt-config mysql-apt-config/select-server select mysql-$MYSQL_VERSION" | debconf-set-selections
+  echo "mysql-apt-config mysql-apt-config/select-product select Ok" | debconf-set-selections
+
+  # 安装 MySQL APT 配置包
+  echo "安装 MySQL APT 配置包..."
+  DEBIAN_FRONTEND=noninteractive dpkg -i /tmp/mysql-apt-config_latest_all.deb
+
+  if [ $? -ne 0 ]; then
+    echo "安装 MySQL APT 配置包失败。"
+    return
+  fi
+
+  # 更新包列表以包括 MySQL 仓库
   apt update
 
   # 安装 MySQL Server
   echo "安装 MySQL Server..."
   DEBIAN_FRONTEND=noninteractive apt install -y mysql-server
 
-  # 设置 MySQL root 密码
-  echo "设置 MySQL root 密码..."
+  if [ $? -ne 0 ]; then
+    echo "安装 MySQL Server 失败。请检查 MySQL APT 仓库配置或网络连接。"
+    return
+  fi
+
+  # 启动并启用 MySQL 服务
+  systemctl start mysql
+  systemctl enable mysql
+
+  # 设置 MySQL root 密码并进行安全配置
+  echo "设置 MySQL root 密码并进行安全配置..."
+  
+  # 检查是否安装了 mysql_secure_installation
+  if ! command -v mysql_secure_installation &> /dev/null; then
+    echo "mysql_secure_installation 未找到，尝试安装..."
+    apt install -y mysql_secure_installation
+    if [ $? -ne 0 ]; then
+      echo "安装 mysql_secure_installation 失败。请手动运行 'mysql_secure_installation' 进行配置。"
+      return
+    fi
+  fi
+
+  # 自动执行 mysql_secure_installation
   mysql_secure_installation <<EOF
 
 y
-$MYSQL_ROOT_PASSWORD
-$MYSQL_ROOT_PASSWORD
+$DEFAULT_MYSQL_ROOT_PASSWORD
+$DEFAULT_MYSQL_ROOT_PASSWORD
 y
 y
 y
@@ -75,7 +116,7 @@ add_database() {
     return
   fi
 
-  mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE \`$db_name\`;" 2>/dev/null
+  mysql -u root -p"$DEFAULT_MYSQL_ROOT_PASSWORD" -e "CREATE DATABASE \`$db_name\`;" 2>/dev/null
 
   if [ $? -eq 0 ]; then
     echo "数据库 '$db_name' 创建成功。"
@@ -87,7 +128,7 @@ add_database() {
 # 函数：管理数据库
 manage_database() {
   echo "现有数据库列表："
-  mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES;" | grep -vE "Database|information_schema|performance_schema|mysql|sys"
+  mysql -u root -p"$DEFAULT_MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES;" | grep -vE "Database|information_schema|performance_schema|mysql|sys"
 
   read -p "请输入要管理的数据库名称： " db_name
   if [[ -z "$db_name" ]]; then
@@ -96,7 +137,7 @@ manage_database() {
   fi
 
   # 检查数据库是否存在
-  exists=$(mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES LIKE '$db_name';" | grep "$db_name")
+  exists=$(mysql -u root -p"$DEFAULT_MYSQL_ROOT_PASSWORD" -e "SHOW DATABASES LIKE '$db_name';" | grep "$db_name")
   if [[ "$exists" != "$db_name" ]]; then
     echo "数据库 '$db_name' 不存在。"
     return
@@ -110,12 +151,12 @@ manage_database() {
 
   case $action_choice in
     1)
-      mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "USE \`$db_name\`; SHOW TABLES;"
+      mysql -u root -p"$DEFAULT_MYSQL_ROOT_PASSWORD" -e "USE \`$db_name\`; SHOW TABLES;"
       ;;
     2)
       read -p "请输入要创建的表名： " table_name
       read -p "请输入表的列定义（例如: id INT PRIMARY KEY, name VARCHAR(50)）： " columns
-      mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "USE \`$db_name\`; CREATE TABLE \`$table_name\` ($columns);"
+      mysql -u root -p"$DEFAULT_MYSQL_ROOT_PASSWORD" -e "USE \`$db_name\`; CREATE TABLE \`$table_name\` ($columns);"
       if [ $? -eq 0 ]; then
         echo "表 '$table_name' 创建成功。"
       else
@@ -125,7 +166,7 @@ manage_database() {
     3)
       read -p "您确定要删除数据库 '$db_name' 吗？请输入 '确认' 以继续： " confirm
       if [ "$confirm" == "确认" ]; then
-        mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "DROP DATABASE \`$db_name\`;"
+        mysql -u root -p"$DEFAULT_MYSQL_ROOT_PASSWORD" -e "DROP DATABASE \`$db_name\`;"
         if [ $? -eq 0 ]; then
           echo "数据库 '$db_name' 已删除。"
         else
