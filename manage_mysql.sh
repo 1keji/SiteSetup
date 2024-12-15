@@ -3,6 +3,9 @@
 # MySQL 管理脚本
 # 需要以 root 或具有 sudo 权限的用户运行
 
+# Docker 容器名称
+MYSQL_CONTAINER_NAME="mysql-docker"
+
 # 检查 Docker 是否安装
 function check_docker() {
     if ! command -v docker &> /dev/null
@@ -27,6 +30,12 @@ function install_mysql() {
     read -p "版本: " mysql_version
     if [[ -z "$mysql_version" ]]; then
         echo "未输入版本号，安装已取消。"
+        return
+    fi
+
+    # 检查是否已存在同名容器
+    if docker ps -a --format '{{.Names}}' | grep -wq "$MYSQL_CONTAINER_NAME"; then
+        echo "容器名称 '$MYSQL_CONTAINER_NAME' 已存在。请先删除现有容器或选择不同的名称。"
         return
     fi
 
@@ -55,7 +64,7 @@ function install_mysql() {
 
     # 运行 Docker 容器
     docker run -d \
-    --name mysql-docker \
+    --name "$MYSQL_CONTAINER_NAME" \
     -p ${port}:3306 \
     -e MYSQL_ROOT_PASSWORD=${root_password} \
     -v ${mount_path}:/var/lib/mysql \
@@ -71,7 +80,7 @@ function install_mysql() {
 # 添加数据库
 function add_database() {
     # 检查 MySQL 容器是否运行
-    if ! docker ps | grep -q mysql-docker
+    if ! docker ps | grep -q "$MYSQL_CONTAINER_NAME"
     then
         echo "MySQL 容器未运行，请先安装并启动 MySQL。"
         return
@@ -106,15 +115,19 @@ function add_database() {
     case $encoding_choice in
         1)
             db_charset="utf8"
+            db_collate="utf8_general_ci"
             ;;
         2)
             db_charset="utf8mb4"
+            db_collate="utf8mb4_general_ci"
             ;;
         3)
             db_charset="latin1"
+            db_collate="latin1_swedish_ci"
             ;;
         4)
             db_charset="gbk"
+            db_collate="gbk_chinese_ci"
             ;;
         *)
             echo "无效的选择，操作已取消。"
@@ -130,7 +143,7 @@ function add_database() {
     fi
 
     # 创建数据库
-    docker exec -i mysql-docker mysql -uroot -p${root_password} -e "CREATE DATABASE \`${db_name}\` CHARACTER SET ${db_charset} COLLATE ${db_charset}_general_ci;"
+    docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "CREATE DATABASE \`${db_name}\` CHARACTER SET ${db_charset} COLLATE ${db_collate};"
 
     if [ $? -ne 0 ]; then
         echo "数据库创建失败。请检查密码是否正确或数据库是否已存在。"
@@ -138,15 +151,15 @@ function add_database() {
     fi
 
     # 创建用户并授权
-    docker exec -i mysql-docker mysql -uroot -p${root_password} -e "CREATE USER '${db_user}'@'%' IDENTIFIED BY '${db_password}';"
+    docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "CREATE USER '${db_user}'@'%' IDENTIFIED BY '${db_password}';"
     if [ $? -ne 0 ]; then
         echo "用户创建失败。请检查用户名是否已存在。"
         # 尝试删除已创建的数据库
-        docker exec -i mysql-docker mysql -uroot -p${root_password} -e "DROP DATABASE \`${db_name}\`;"
+        docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "DROP DATABASE \`${db_name}\`;"
         return
     fi
 
-    docker exec -i mysql-docker mysql -uroot -p${root_password} -e "GRANT ALL PRIVILEGES ON \`${db_name}\`.* TO '${db_user}'@'%'; FLUSH PRIVILEGES;"
+    docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "GRANT ALL PRIVILEGES ON \`${db_name}\`.* TO '${db_user}'@'%'; FLUSH PRIVILEGES;"
     if [ $? -eq 0 ]; then
         echo "数据库 '${db_name}' 和用户 '${db_user}' 创建并授权成功。"
     else
@@ -157,7 +170,7 @@ function add_database() {
 # 管理数据库
 function manage_database() {
     # 检查 MySQL 容器是否运行
-    if ! docker ps | grep -q mysql-docker
+    if ! docker ps | grep -q "$MYSQL_CONTAINER_NAME"
     then
         echo "MySQL 容器未运行，请先安装并启动 MySQL。"
         return
@@ -174,7 +187,7 @@ function manage_database() {
         1)
             read -s -p "请输入 MySQL root 用户密码: " root_password
             echo
-            docker exec -i mysql-docker mysql -uroot -p${root_password} -e "SHOW DATABASES;"
+            docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "SHOW DATABASES;"
             ;;
         2)
             read -p "请输入要删除的数据库名称: " db_name
@@ -184,7 +197,7 @@ function manage_database() {
             fi
             read -s -p "请输入 MySQL root 用户密码: " root_password
             echo
-            docker exec -i mysql-docker mysql -uroot -p${root_password} -e "DROP DATABASE \`${db_name}\`;"
+            docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "DROP DATABASE \`${db_name}\`;"
             if [ $? -eq 0 ]; then
                 echo "数据库 '${db_name}' 删除成功。"
             else
@@ -200,11 +213,13 @@ function manage_database() {
             fi
             read -s -p "请输入 MySQL root 用户密码: " root_password
             echo
-            # 检查是否支持重命名（MySQL 8.0.23+ 支持 RENAME DATABASE）
-            mysql_version=$(docker exec -i mysql-docker mysql -uroot -p${root_password} -e "SELECT VERSION();" | awk 'NR==2 {print $1}')
-            if [[ "$(printf '%s\n' "8.0.23" "$mysql_version" | sort -V | head -n1)" = "8.0.23" && "$mysql_version" != "8.0.23" ]]; then
+            # 检查 MySQL 版本以决定是否支持 RENAME DATABASE
+            mysql_version=$(docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "SELECT VERSION();" | awk 'NR==2 {print $1}')
+            # 比较版本
+            required_version="8.0.23"
+            if [[ "$(printf '%s\n' "$required_version" "$mysql_version" | sort -V | head -n1)" == "$required_version" && "$mysql_version" != "$required_version" ]]; then
                 # MySQL 支持 RENAME DATABASE
-                docker exec -i mysql-docker mysql -uroot -p${root_password} -e "RENAME DATABASE \`${old_db}\` TO \`${new_db}\`;"
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "RENAME DATABASE \`${old_db}\` TO \`${new_db}\`;"
                 if [ $? -eq 0 ]; then
                     echo "数据库 '${old_db}' 重命名为 '${new_db}' 成功。"
                 else
@@ -212,10 +227,25 @@ function manage_database() {
                 fi
             else
                 # 不支持直接重命名，采用导出导入方式
-                docker exec -i mysql-docker mysqldump -uroot -p${root_password} ${old_db} > /tmp/${old_db}.sql
-                docker exec -i mysql-docker mysql -uroot -p${root_password} -e "CREATE DATABASE \`${new_db}\`;"
-                docker exec -i mysql-docker mysql -uroot -p${root_password} ${new_db} < /tmp/${old_db}.sql
-                docker exec -i mysql-docker mysql -uroot -p${root_password} -e "DROP DATABASE \`${old_db}\`;"
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysqldump -uroot -p${root_password} ${old_db} > /tmp/${old_db}.sql
+                if [ $? -ne 0 ]; then
+                    echo "导出数据库 '${old_db}' 失败。"
+                    return
+                fi
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "CREATE DATABASE \`${new_db}\`;"
+                if [ $? -ne 0 ]; then
+                    echo "创建新数据库 '${new_db}' 失败。"
+                    rm -f /tmp/${old_db}.sql
+                    return
+                fi
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} ${new_db} < /tmp/${old_db}.sql
+                if [ $? -ne 0 ]; then
+                    echo "导入数据到新数据库 '${new_db}' 失败。"
+                    docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "DROP DATABASE \`${new_db}\`;"
+                    rm -f /tmp/${old_db}.sql
+                    return
+                fi
+                docker exec -i "$MYSQL_CONTAINER_NAME" mysql -uroot -p${root_password} -e "DROP DATABASE \`${old_db}\`;"
                 rm -f /tmp/${old_db}.sql
                 if [ $? -eq 0 ]; then
                     echo "数据库 '${old_db}' 重命名为 '${new_db}' 成功。"
@@ -233,23 +263,148 @@ function manage_database() {
     esac
 }
 
-# 卸载 MySQL
-function uninstall_mysql() {
-    read -p "确定要卸载 MySQL 吗？输入 'y' 以确认: " confirm
-    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-        echo "确认失败，卸载已取消。"
+# 管理 MySQL 容器
+function manage_mysql_container() {
+    # 检查是否存在 MySQL 容器
+    container_exists=$(docker ps -a --format '{{.Names}}' | grep -w "$MYSQL_CONTAINER_NAME")
+    if [[ -z "$container_exists" ]]; then
+        echo "MySQL 容器 '$MYSQL_CONTAINER_NAME' 不存在。"
         return
     fi
 
-    # 停止并移除容器
-    docker stop mysql-docker
-    docker rm mysql-docker
+    echo "请选择容器管理操作："
+    echo "1. 启动容器"
+    echo "2. 停止容器"
+    echo "3. 重启容器"
+    echo "4. 删除容器"
+    echo "0. 返回主菜单"
+    read -p "选择: " container_choice
 
-    if [ $? -eq 0 ]; then
-        echo "MySQL Docker 容器已成功卸载。"
-    else
-        echo "卸载失败。请检查 Docker 容器是否存在或当前用户是否有权限。"
-    fi
+    case $container_choice in
+        1)
+            docker start "$MYSQL_CONTAINER_NAME"
+            if [ $? -eq 0 ]; then
+                echo "容器 '$MYSQL_CONTAINER_NAME' 启动成功。"
+            else
+                echo "启动容器失败。"
+            fi
+            ;;
+        2)
+            docker stop "$MYSQL_CONTAINER_NAME"
+            if [ $? -eq 0 ]; then
+                echo "容器 '$MYSQL_CONTAINER_NAME' 已停止。"
+            else
+                echo "停止容器失败。"
+            fi
+            ;;
+        3)
+            docker restart "$MYSQL_CONTAINER_NAME"
+            if [ $? -eq 0 ]; then
+                echo "容器 '$MYSQL_CONTAINER_NAME' 重启成功。"
+            else
+                echo "重启容器失败。"
+            fi
+            ;;
+        4)
+            read -p "确定要删除容器 '$MYSQL_CONTAINER_NAME' 吗？输入 'y' 以确认: " confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                echo "确认失败，删除容器已取消。"
+                return
+            fi
+            docker stop "$MYSQL_CONTAINER_NAME"
+            docker rm "$MYSQL_CONTAINER_NAME"
+            if [ $? -eq 0 ]; then
+                echo "容器 '$MYSQL_CONTAINER_NAME' 已成功删除。"
+            else
+                echo "删除容器失败。请检查容器是否存在或当前用户是否有权限。"
+            fi
+            ;;
+        0)
+            return
+            ;;
+        *)
+            echo "无效的选择。"
+            ;;
+    esac
+}
+
+# 管理 MySQL 镜像
+function manage_mysql_images() {
+    echo "请选择镜像管理操作："
+    echo "1. 查看已安装的 MySQL 镜像"
+    echo "2. 删除 MySQL 镜像"
+    echo "3. 更新（拉取）MySQL 镜像"
+    echo "0. 返回主菜单"
+    read -p "选择: " image_choice
+
+    case $image_choice in
+        1)
+            echo "已安装的 MySQL 镜像："
+            docker images mysql --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.CreatedSince}}\t{{.Size}}"
+            ;;
+        2)
+            read -p "请输入要删除的 MySQL 镜像标签（例如 5.7, 8.0）: " image_tag
+            if [[ -z "$image_tag" ]]; then
+                echo "未输入镜像标签，操作已取消。"
+                return
+            fi
+            image_name="mysql:${image_tag}"
+            # 检查镜像是否存在
+            if ! docker images | grep -w "$image_name" &> /dev/null; then
+                echo "镜像 '$image_name' 不存在。"
+                return
+            fi
+            # 确认删除
+            read -p "确定要删除镜像 '$image_name' 吗？输入 'y' 以确认: " confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                echo "确认失败，删除镜像已取消。"
+                return
+            fi
+            docker rmi "$image_name"
+            if [ $? -eq 0 ]; then
+                echo "镜像 '$image_name' 已成功删除。"
+            else
+                echo "删除镜像失败。请确保没有容器在使用该镜像。"
+            fi
+            ;;
+        3)
+            echo "请选择要拉取的 MySQL 版本："
+            echo "1. 5.7"
+            echo "2. 8.0"
+            echo "3. 8.0.32" # 例如具体版本
+            read -p "选择版本 (1-3): " update_choice
+
+            case $update_choice in
+                1)
+                    pull_version="5.7"
+                    ;;
+                2)
+                    pull_version="8.0"
+                    ;;
+                3)
+                    pull_version="8.0.32"
+                    ;;
+                *)
+                    echo "无效的选择，操作已取消。"
+                    return
+                    ;;
+            esac
+
+            echo "正在拉取 MySQL 镜像版本 '$pull_version'..."
+            docker pull mysql:${pull_version}
+            if [ $? -eq 0 ]; then
+                echo "MySQL 镜像版本 '$pull_version' 拉取成功。"
+            else
+                echo "拉取 MySQL 镜像失败。"
+            fi
+            ;;
+        0)
+            return
+            ;;
+        *)
+            echo "无效的选择。"
+            ;;
+    esac
 }
 
 # 主菜单
@@ -260,7 +415,8 @@ function main_menu() {
         echo "1. 安装 MySQL"
         echo "2. 添加数据库"
         echo "3. 管理数据库"
-        echo "4. 卸载 MySQL"
+        echo "4. 管理 MySQL 容器"
+        echo "5. 管理 MySQL 镜像"
         echo "0. 退出"
         echo "==============================================="
         read -p "请选择一个选项: " choice
@@ -275,7 +431,10 @@ function main_menu() {
                 manage_database
                 ;;
             4)
-                uninstall_mysql
+                manage_mysql_container
+                ;;
+            5)
+                manage_mysql_images
                 ;;
             0)
                 echo "退出脚本。"
