@@ -1,182 +1,184 @@
 #!/bin/bash
 
-# 检查是否以root运行
-if [ "$EUID" -ne 0 ]; then
-  echo "请以root用户或使用sudo运行此脚本。"
-  exit
-fi
+# MySQL 管理脚本
 
-# 更新包列表
-update_system() {
-    echo "更新系统包列表..."
-    apt-get update
+# 检测操作系统类型
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        VER=$VERSION_ID
+    else
+        echo "无法检测操作系统类型。"
+        exit 1
+    fi
 }
 
-# 安装必要的依赖项
+# 安装依赖项
 install_dependencies() {
-    echo "安装依赖项..."
-    apt-get install -y wget gnupg lsb-release
+    echo "安装必要的依赖项..."
+
+    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
+        sudo apt update
+        sudo apt install -y wget lsb-release gnupg
+    elif [[ "$OS" == "centos" || "$OS" == "rhel" || "$OS" == "fedora" ]]; then
+        if [[ "$OS" == "centos" || "$OS" == "rhel" ]]; then
+            sudo yum install -y wget
+        else
+            sudo dnf install -y wget
+        fi
+    else
+        echo "不支持的操作系统。"
+        exit 1
+    fi
 }
 
 # 安装 MySQL
 install_mysql() {
     echo "请选择要安装的 MySQL 版本："
-    echo "1. 8.0"
-    echo "2. 5.7"
-    read -p "请输入选项 (1-2): " version_choice
+    echo "1) MySQL 5.7"
+    echo "2) MySQL 8.0"
+    read -p "请输入数字选择版本: " version_choice
 
     case $version_choice in
         1)
-            MYSQL_VERSION="8.0"
-            ;;
-        2)
             MYSQL_VERSION="5.7"
             ;;
+        2)
+            MYSQL_VERSION="8.0"
+            ;;
         *)
-            echo "无效的选项。返回主菜单。"
+            echo "无效的选择。返回主菜单。"
             return
             ;;
     esac
 
-    echo "安装 MySQL ${MYSQL_VERSION}..."
+    echo "选择的 MySQL 版本: $MYSQL_VERSION"
 
-    # 下载并添加 MySQL APT repository
-    wget https://dev.mysql.com/get/mysql-apt-config_${MYSQL_VERSION}-1_all.deb -O /tmp/mysql-apt-config.deb
-    dpkg -i /tmp/mysql-apt-config.deb
+    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
+        sudo apt update
+        sudo apt install -y gnupg
+        wget https://dev.mysql.com/get/mysql-apt-config_${MYSQL_VERSION}-1_all.deb
+        sudo dpkg -i mysql-apt-config_${MYSQL_VERSION}-1_all.deb
+        sudo apt update
+        sudo apt install -y mysql-server
+        rm mysql-apt-config_${MYSQL_VERSION}-1_all.deb
+    elif [[ "$OS" == "centos" || "$OS" == "rhel" ]]; then
+        if [[ "$VER" == "8" ]]; then
+            sudo dnf install -y https://dev.mysql.com/get/mysql80-community-release-el8-1.noarch.rpm
+        elif [[ "$VER" == "7" ]]; then
+            sudo yum install -y https://dev.mysql.com/get/mysql57-community-release-el7-11.noarch.rpm
+        else
+            echo "不支持的 CentOS/RHEL 版本。"
+            return
+        fi
 
-    # 更新包列表
-    apt-get update
+        if [[ "$MYSQL_VERSION" == "5.7" ]]; then
+            sudo yum-config-manager --disable mysql80-community
+            sudo yum-config-manager --enable mysql57-community
+        elif [[ "$MYSQL_VERSION" == "8.0" ]]; then
+            sudo yum-config-manager --disable mysql57-community
+            sudo yum-config-manager --enable mysql80-community
+        fi
 
-    # 安装 MySQL Server
-    DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
-
-    # 启动并启用 MySQL 服务
-    systemctl start mysql
-    systemctl enable mysql
-
-    echo "MySQL ${MYSQL_VERSION} 安装完成。"
-}
-
-# 添加数据库
-add_database() {
-    read -p "请输入要创建的数据库名称: " db_name
-    read -p "请输入 MySQL root 用户的密码: " -s root_password
-    echo
-
-    mysql -u root -p${root_password} -e "CREATE DATABASE ${db_name};"
-
-    if [ $? -eq 0 ]; then
-        echo "数据库 '${db_name}' 创建成功。"
+        sudo yum install -y mysql-server
     else
-        echo "数据库创建失败。请检查 MySQL 是否已正确安装并且密码正确。"
+        echo "不支持的操作系统。"
+        return
+    fi
+
+    echo "MySQL $MYSQL_VERSION 安装完成。"
+
+    # 启动并设置 MySQL 开机自启
+    sudo systemctl start mysqld
+    sudo systemctl enable mysqld
+
+    # 获取临时密码（适用于 MySQL 5.7）
+    if [[ "$MYSQL_VERSION" == "5.7" ]]; then
+        TEMP_PWD=$(sudo grep 'temporary password' /var/log/mysqld.log | awk '{print $NF}')
+        echo "MySQL 临时密码: $TEMP_PWD"
+        echo "请使用以下命令更改密码:"
+        echo "sudo mysql_secure_installation"
     fi
 }
 
-# 管理数据库
-manage_database() {
-    read -p "请输入 MySQL root 用户的密码: " -s root_password
-    echo
-
-    echo "可用的数据库列表："
-    mysql -u root -p${root_password} -e "SHOW DATABASES;"
-
-    echo "请选择要管理的数据库："
-    read -p "数据库名称: " db_name
-
-    echo "1. 查看表"
-    echo "2. 创建表"
-    echo "3. 删除表"
-    read -p "请输入选项 (1-3): " manage_choice
-
-    case $manage_choice in
-        1)
-            mysql -u root -p${root_password} -e "USE ${db_name}; SHOW TABLES;"
-            ;;
-        2)
-            read -p "请输入要创建的表名: " table_name
-            read -p "请输入表结构 (例如: id INT PRIMARY KEY, name VARCHAR(50)): " table_structure
-            mysql -u root -p${root_password} -e "USE ${db_name}; CREATE TABLE ${table_name} (${table_structure});"
-            if [ $? -eq 0 ]; then
-                echo "表 '${table_name}' 创建成功。"
-            else
-                echo "表创建失败。"
-            fi
-            ;;
-        3)
-            read -p "请输入要删除的表名: " table_name
-            mysql -u root -p${root_password} -e "USE ${db_name}; DROP TABLE ${table_name};"
-            if [ $? -eq 0 ]; then
-                echo "表 '${table_name}' 删除成功。"
-            else
-                echo "表删除失败。"
-            fi
-            ;;
-        *)
-            echo "无效的选项。返回主菜单。"
-            ;;
-    esac
+# 查询 MySQL 状态
+query_status() {
+    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
+        sudo systemctl status mysql --no-pager
+    elif [[ "$OS" == "centos" || "$OS" == "rhel" || "$OS" == "fedora" ]]; then
+        sudo systemctl status mysqld --no-pager
+    else
+        echo "不支持的操作系统。"
+    fi
 }
 
 # 卸载 MySQL
 uninstall_mysql() {
-    read -p "请输入确认卸载 MySQL 的文字: " confirm_text
-    if [ "$confirm_text" == "卸载 MySQL" ]; then
-        echo "正在卸载 MySQL..."
-        apt-get remove --purge -y mysql-server mysql-client mysql-common
-        apt-get autoremove -y
-        apt-get autoclean
-        rm -rf /etc/mysql /var/lib/mysql
-        echo "MySQL 已成功卸载。"
-    else
-        echo "确认文字不正确。取消卸载。"
+    read -p "请输入确认文字以卸载 MySQL 数据库: " confirm_text
+
+    if [[ "$confirm_text" != "确认卸载mysql数据库" ]]; then
+        echo "确认文字不正确，取消卸载。"
+        return
     fi
+
+    echo "开始卸载 MySQL..."
+
+    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
+        sudo systemctl stop mysql
+        sudo apt purge -y mysql-server mysql-client mysql-common
+        sudo rm -rf /etc/mysql /var/lib/mysql
+        sudo apt autoremove -y
+        sudo apt autoclean
+    elif [[ "$OS" == "centos" || "$OS" == "rhel" ]]; then
+        sudo systemctl stop mysqld
+        sudo yum remove -y mysql-server
+        sudo rm -rf /var/lib/mysql /etc/my.cnf
+    else
+        echo "不支持的操作系统。"
+        return
+    fi
+
+    echo "MySQL 已成功卸载。"
 }
 
-# 显示菜单
-show_menu() {
-    echo "============================"
-    echo " MySQL 管理脚本"
-    echo "============================"
-    echo "1. 安装 MySQL"
-    echo "2. 添加数据库"
-    echo "3. 管理数据库"
-    echo "4. 卸载 MySQL"
-    echo "0. 退出"
-    echo "============================"
-}
-
-# 主循环
-main() {
-    update_system
-    install_dependencies
-
+# 主菜单
+main_menu() {
     while true; do
-        show_menu
-        read -p "请输入选项: " choice
+        echo "=============================="
+        echo " MySQL 管理脚本"
+        echo "=============================="
+        echo "1) 安装 MySQL"
+        echo "2) 查询数据库状态"
+        echo "3) 卸载 MySQL 数据库"
+        echo "0) 退出脚本"
+        echo "=============================="
+        read -p "请输入您的选择: " choice
+
         case $choice in
             1)
+                install_dependencies
                 install_mysql
                 ;;
             2)
-                add_database
+                query_status
                 ;;
             3)
-                manage_database
-                ;;
-            4)
                 uninstall_mysql
                 ;;
             0)
                 echo "退出脚本。"
-                exit
+                exit 0
                 ;;
             *)
-                echo "无效的选项，请重新选择。"
+                echo "无效的选择，请重新输入。"
                 ;;
         esac
-        echo
+
+        echo ""
     done
 }
 
-# 运行主函数
-main
+# 执行脚本
+detect_os
+main_menu
