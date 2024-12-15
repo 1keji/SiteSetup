@@ -83,15 +83,74 @@ function add_database() {
         return
     fi
 
+    read -p "请输入要创建的用户名: " db_user
+    if [[ -z "$db_user" ]]; then
+        echo "未输入用户名，操作已取消。"
+        return
+    fi
+
+    read -s -p "请输入该用户的密码: " db_password
+    echo
+    if [[ -z "$db_password" ]]; then
+        echo "未设置用户密码，操作已取消。"
+        return
+    fi
+
+    echo "请选择数据库编码："
+    echo "1. utf8"
+    echo "2. utf8mb4"
+    echo "3. latin1"
+    echo "4. gbk"
+    read -p "选择编码 (1-4): " encoding_choice
+
+    case $encoding_choice in
+        1)
+            db_charset="utf8"
+            ;;
+        2)
+            db_charset="utf8mb4"
+            ;;
+        3)
+            db_charset="latin1"
+            ;;
+        4)
+            db_charset="gbk"
+            ;;
+        *)
+            echo "无效的选择，操作已取消。"
+            return
+            ;;
+    esac
+
     read -s -p "请输入 MySQL root 用户密码: " root_password
     echo
+    if [[ -z "$root_password" ]]; then
+        echo "未输入 root 密码，操作已取消。"
+        return
+    fi
 
-    docker exec -i mysql-docker mysql -uroot -p${root_password} -e "CREATE DATABASE ${db_name};"
+    # 创建数据库
+    docker exec -i mysql-docker mysql -uroot -p${root_password} -e "CREATE DATABASE \`${db_name}\` CHARACTER SET ${db_charset} COLLATE ${db_charset}_general_ci;"
 
-    if [ $? -eq 0 ]; then
-        echo "数据库 '${db_name}' 创建成功。"
-    else
+    if [ $? -ne 0 ]; then
         echo "数据库创建失败。请检查密码是否正确或数据库是否已存在。"
+        return
+    fi
+
+    # 创建用户并授权
+    docker exec -i mysql-docker mysql -uroot -p${root_password} -e "CREATE USER '${db_user}'@'%' IDENTIFIED BY '${db_password}';"
+    if [ $? -ne 0 ]; then
+        echo "用户创建失败。请检查用户名是否已存在。"
+        # 尝试删除已创建的数据库
+        docker exec -i mysql-docker mysql -uroot -p${root_password} -e "DROP DATABASE \`${db_name}\`;"
+        return
+    fi
+
+    docker exec -i mysql-docker mysql -uroot -p${root_password} -e "GRANT ALL PRIVILEGES ON \`${db_name}\`.* TO '${db_user}'@'%'; FLUSH PRIVILEGES;"
+    if [ $? -eq 0 ]; then
+        echo "数据库 '${db_name}' 和用户 '${db_user}' 创建并授权成功。"
+    else
+        echo "授权失败。"
     fi
 }
 
@@ -125,7 +184,7 @@ function manage_database() {
             fi
             read -s -p "请输入 MySQL root 用户密码: " root_password
             echo
-            docker exec -i mysql-docker mysql -uroot -p${root_password} -e "DROP DATABASE ${db_name};"
+            docker exec -i mysql-docker mysql -uroot -p${root_password} -e "DROP DATABASE \`${db_name}\`;"
             if [ $? -eq 0 ]; then
                 echo "数据库 '${db_name}' 删除成功。"
             else
@@ -141,16 +200,28 @@ function manage_database() {
             fi
             read -s -p "请输入 MySQL root 用户密码: " root_password
             echo
-            # MySQL 不支持直接重命名数据库，需要导出和导入
-            docker exec -i mysql-docker mysqldump -uroot -p${root_password} ${old_db} > /tmp/${old_db}.sql
-            docker exec -i mysql-docker mysql -uroot -p${root_password} -e "CREATE DATABASE ${new_db};"
-            docker exec -i mysql-docker mysql -uroot -p${root_password} ${new_db} < /tmp/${old_db}.sql
-            docker exec -i mysql-docker mysql -uroot -p${root_password} -e "DROP DATABASE ${old_db};"
-            rm -f /tmp/${old_db}.sql
-            if [ $? -eq 0 ]; then
-                echo "数据库 '${old_db}' 重命名为 '${new_db}' 成功。"
+            # 检查是否支持重命名（MySQL 8.0.23+ 支持 RENAME DATABASE）
+            mysql_version=$(docker exec -i mysql-docker mysql -uroot -p${root_password} -e "SELECT VERSION();" | awk 'NR==2 {print $1}')
+            if [[ "$(printf '%s\n' "8.0.23" "$mysql_version" | sort -V | head -n1)" = "8.0.23" && "$mysql_version" != "8.0.23" ]]; then
+                # MySQL 支持 RENAME DATABASE
+                docker exec -i mysql-docker mysql -uroot -p${root_password} -e "RENAME DATABASE \`${old_db}\` TO \`${new_db}\`;"
+                if [ $? -eq 0 ]; then
+                    echo "数据库 '${old_db}' 重命名为 '${new_db}' 成功。"
+                else
+                    echo "重命名数据库失败。"
+                fi
             else
-                echo "重命名数据库失败。"
+                # 不支持直接重命名，采用导出导入方式
+                docker exec -i mysql-docker mysqldump -uroot -p${root_password} ${old_db} > /tmp/${old_db}.sql
+                docker exec -i mysql-docker mysql -uroot -p${root_password} -e "CREATE DATABASE \`${new_db}\`;"
+                docker exec -i mysql-docker mysql -uroot -p${root_password} ${new_db} < /tmp/${old_db}.sql
+                docker exec -i mysql-docker mysql -uroot -p${root_password} -e "DROP DATABASE \`${old_db}\`;"
+                rm -f /tmp/${old_db}.sql
+                if [ $? -eq 0 ]; then
+                    echo "数据库 '${old_db}' 重命名为 '${new_db}' 成功。"
+                else
+                    echo "重命名数据库失败。"
+                fi
             fi
             ;;
         0)
@@ -164,8 +235,8 @@ function manage_database() {
 
 # 卸载 MySQL
 function uninstall_mysql() {
-    read -p "确定要卸载 MySQL 吗？输入 '卸载' 以确认: " confirm
-    if [[ "$confirm" != "卸载" ]]; then
+    read -p "确定要卸载 MySQL 吗？输入 'y' 以确认: " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
         echo "确认失败，卸载已取消。"
         return
     fi
@@ -174,16 +245,11 @@ function uninstall_mysql() {
     docker stop mysql-docker
     docker rm mysql-docker
 
-    # 可选择是否删除挂载的卷
-    read -p "是否删除持久化数据目录？(y/N): " delete_volume
-    if [[ "$delete_volume" =~ ^[Yy]$ ]]; then
-        read -p "请输入持久化挂载路径（默认: /root/.docker/mysql）: " mount_path
-        mount_path=${mount_path:-/root/.docker/mysql}
-        rm -rf "$mount_path"
-        echo "持久化数据目录已删除。"
+    if [ $? -eq 0 ]; then
+        echo "MySQL Docker 容器已成功卸载。"
+    else
+        echo "卸载失败。请检查 Docker 容器是否存在或当前用户是否有权限。"
     fi
-
-    echo "MySQL 已成功卸载。"
 }
 
 # 主菜单
