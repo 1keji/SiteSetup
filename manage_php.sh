@@ -260,29 +260,48 @@ uninstall_php_extensions() {
 # 禁用 PHP 函数
 disable_php_functions() {
     local version="$1"
-    echo "管理 PHP $version 的扩展 - 禁用函数"
-    read -p "请输入要禁用的函数（用逗号分隔）: " functions_input
-    IFS=',' read -ra functions <<< "$functions_input"
+    echo "管理 PHP $version 的函数 - 禁用函数"
+    
     php_ini=$(get_php_ini "$version")
     if [[ -z "$php_ini" ]]; then
         echo "未找到 PHP $version 的 php.ini 文件。"
         return
     fi
+    
     # 获取当前禁用的函数
     current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ')
+
+    if [[ -n "$current_disabled" ]]; then
+        echo "当前已禁用的函数：$current_disabled"
+    else
+        echo "当前没有禁用任何函数。"
+    fi
+
+    echo
+    read -p "请输入要禁用的函数（用逗号分隔）: " functions_input
+    IFS=',' read -ra functions <<< "$functions_input"
+    
     for func in "${functions[@]}"; do
-        func_trimmed=$(echo "$func" | xargs)
+        func_trimmed=$(echo "$func" | xargs) # 去除空格
         if echo "$current_disabled" | grep -qw "$func_trimmed"; then
             echo "函数 $func_trimmed 已经被禁用，跳过。"
         else
             if grep -q "^disable_functions" "$php_ini"; then
-                sed -i "s/^disable_functions\s*=.*/disable_functions = $current_disabled,$func_trimmed/" "$php_ini"
+                if [[ -z "$current_disabled" ]]; then
+                    new_disabled="$func_trimmed"
+                else
+                    new_disabled="$current_disabled,$func_trimmed"
+                fi
+                sed -i "s/^disable_functions\s*=.*/disable_functions = $new_disabled/" "$php_ini"
             else
                 echo "disable_functions = $func_trimmed" >> "$php_ini"
             fi
             echo "函数 $func_trimmed 已被禁用。"
+            # 更新当前禁用的函数变量
+            current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ')
         fi
     done
+    
     # 重启 PHP-FPM 服务
     restart_php_fpm "$version"
 }
@@ -290,34 +309,46 @@ disable_php_functions() {
 # 解除禁用 PHP 函数
 enable_php_functions() {
     local version="$1"
-    echo "管理 PHP $version 的扩展 - 解除禁用函数"
-    read -p "请输入要解除禁用的函数（用逗号分隔）: " functions_input
-    IFS=',' read -ra functions <<< "$functions_input"
+    echo "管理 PHP $version 的函数 - 解除禁用函数"
+    
     php_ini=$(get_php_ini "$version")
     if [[ -z "$php_ini" ]]; then
         echo "未找到 PHP $version 的 php.ini 文件。"
         return
     fi
+    
     # 获取当前禁用的函数
     current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ')
+    
+    if [[ -n "$current_disabled" ]]; then
+        echo "当前已禁用的函数：$current_disabled"
+    else
+        echo "当前没有禁用任何函数。"
+    fi
+    
+    echo
+    read -p "请输入要解除禁用的函数（用逗号分隔）: " functions_input
+    IFS=',' read -ra functions <<< "$functions_input"
+    
     for func in "${functions[@]}"; do
-        func_trimmed=$(echo "$func" | xargs)
+        func_trimmed=$(echo "$func" | xargs) # 去除空格
         if echo "$current_disabled" | grep -qw "$func_trimmed"; then
             new_disabled=$(echo "$current_disabled" | sed "s/\b$func_trimmed\b//g" | sed 's/,,/,/g' | sed 's/^,//' | sed 's/,$//')
-            sed -i "s/^disable_functions\s*=.*/disable_functions = $new_disabled/" "$php_ini"
-            echo "函数 $func_trimmed 已被解除禁用。"
+            if [[ -z "$new_disabled" ]]; then
+                # 删除 disable_functions 行
+                sed -i "/^disable_functions\s*=/d" "$php_ini"
+                echo "函数 $func_trimmed 已被解除禁用。"
+                current_disabled=""
+            else
+                sed -i "s/^disable_functions\s*=.*/disable_functions = $new_disabled/" "$php_ini"
+                echo "函数 $func_trimmed 已被解除禁用。"
+                current_disabled="$new_disabled"
+            fi
         else
             echo "函数 $func_trimmed 未被禁用，跳过。"
         fi
     done
-    # 如果 disable_functions 为空，删除该行
-    if grep -qi "^disable_functions\s*=" "$php_ini"; then
-        empty_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ')
-        if [[ -z "$empty_disabled" ]]; then
-            sed -i "/^disable_functions\s*=/d" "$php_ini"
-            echo "所有函数均已启用。"
-        fi
-    fi
+    
     # 重启 PHP-FPM 服务
     restart_php_fpm "$version"
 }
