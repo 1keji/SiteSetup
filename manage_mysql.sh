@@ -2,81 +2,53 @@
 
 ############################################################
 # 说明：
-# 该脚本在 Debian/Ubuntu 系列下测试，其他发行版需要根据实际情况更改包管理命令和安装方式。
+# 该脚本在 Debian/Ubuntu 系列系统下测试。
 # 功能：
-#   1. 安装 MySQL (可选择版本)
+#   1. 安装 MySQL (可选择版本5.7或8.0)
 #   2. 添加数据库
-#   3. 管理数据库（查看和修改数据库信息）
+#   3. 管理数据库（查看和修改已创建的数据库信息）
 #   4. 卸载 MySQL（需要确认文字）
 #   0. 退出
 #
 # 使用注意：
-# 该脚本需要在具备 sudo 权限的用户下执行。
-# 数据库连接和管理可能需要 root 用户或有权限的 MySQL 用户。
-# 如需非交互安装 MySQL，可提前设定 DEBIAN_FRONTEND=noninteractive。
+# - 需要sudo权限执行
+# - 若在无交互环境下运行，可提前设定 DEBIAN_FRONTEND=noninteractive
+#
+# 更新点（方案一修正）：
+# - 添加 MySQL 官方 APT 源，以支持安装5.7或8.0版本的 MySQL
+# - 移除对mysql-server-5.7直接安装的逻辑，改为通过apt仓库选择
 ############################################################
 
-# 全局变量定义
 MYSQL_USER="root"
 MYSQL_PASSWORD=""
 MYSQL_CMD="mysql"
-MYSQLD_CMD="mysqld"
 DB_ROOT_PW_SET=false
 
-# 检查依赖项并安装 (expect、curl、gnupg等)
+# 检查并安装依赖项
 check_and_install_dependencies() {
     echo "正在检查并安装依赖项..."
-    # 使用apt方式安装
     sudo apt-get update -y
-    sudo apt-get install -y curl gnupg expect
-    # 根据需要添加额外依赖，如unzip等
+    sudo apt-get install -y curl gnupg expect wget lsb-release
 }
 
-# 设置MySQL官方源（可选，确保你可以选择版本安装）
+# 添加并配置 MySQL 官方 APT 仓库
 set_mysql_apt_repo() {
-    # 该函数可选，如果你需要特定版本，可提前从MySQL官方网站获取repo包
-    # 下面仅为示例，如果无需特定版本的 repo 可以跳过此步骤。
-    # 假设需要5.7和8.0版本选择
-    # 由于MySQL官方提供的repo可以安装多个版本，这里仅演示过程
-    wget https://dev.mysql.com/get/mysql-apt-config_0.8.23-1_all.deb -O /tmp/mysql-apt-config.deb
+    # 获取系统代号
+    DISTRO_CODENAME=$(lsb_release -sc)
+    # 下载MySQL APT配置包，根据MySQL官方仓库选择最新版本，这里使用0.8.31-1为例
+    # 请根据实际情况替换URL为最新的MySQL APT配置包
+    wget https://dev.mysql.com/get/mysql-apt-config_0.8.31-1_all.deb -O /tmp/mysql-apt-config.deb
+    # 安装apt-config包，交互过程中可选择MySQL版本
+    # 为避免交互，这里使用debconf-set-selections预先设置
+    # 若希望手动选择版本，可在此处手动运行dpkg -i并交互选择。
+    # 下方是直接安装，然后用户选择时再进行交互。
     sudo dpkg -i /tmp/mysql-apt-config.deb
     sudo apt-get update -y
 }
 
-# 安装MySQL（可选择版本）
-install_mysql() {
-    echo "请选择需要安装的 MySQL 版本："
-    echo "1) MySQL 5.7"
-    echo "2) MySQL 8.0"
-    read -p "输入选项编号(1或2): " version_choice
-
-    case $version_choice in
-        1)
-            # 设置仓库为5.7
-            # 假设已经有上面的set_mysql_apt_repo功能，如果不需要可直接安装默认版本
-            sudo apt-get install -y mysql-server-5.7
-            ;;
-        2)
-            # 设置仓库为8.0
-            sudo apt-get install -y mysql-server-8.0
-            ;;
-        *)
-            echo "无效的选项."
-            return 1
-            ;;
-    esac
-
-    # 安装后可能需要初始化root密码，如果安装过程会要求输入root密码，则可使用expect非交互方式设置
-    # 如果已在安装过程中设置，此处可跳过。
-    set_mysql_root_password
-}
-
-set_mysql_root_password() {
-    if [ "$DB_ROOT_PW_SET" = false ]; then
-        read -sp "请为 MySQL root 用户设置密码:" MYSQL_PASSWORD
-        echo
-        # 使用expect来非交互式设置root密码
-        SECURE_MYSQL=$(expect -c "
+# 使用 expect 自动运行 mysql_secure_installation
+run_mysql_secure_installation() {
+    SECURE_MYSQL=$(expect -c "
 set timeout 10
 spawn sudo mysql_secure_installation
 expect \"Press y|Y for Yes, any other key for No:\"
@@ -88,18 +60,57 @@ send \"$MYSQL_PASSWORD\r\"
 expect \"Remove anonymous users?\"
 send \"y\r\"
 expect \"Disallow root login remotely?\"
-send \"n\r\"        # 根据需求选择y或n，此处示例为允许远程
+send \"n\r\"        # 如果需要禁止远程登录改为y
 expect \"Remove test database and access to it?\"
 send \"y\r\"
 expect \"Reload privilege tables now?\"
 send \"y\r\"
 expect eof
 ")
+    echo "$SECURE_MYSQL"
+    DB_ROOT_PW_SET=true
+}
 
-        echo "$SECURE_MYSQL"
-        DB_ROOT_PW_SET=true
-        MYSQL_CMD="mysql -u$MYSQL_USER -p$MYSQL_PASSWORD"
-    fi
+# 安装MySQL（可选择版本）
+install_mysql() {
+    echo "请选择需要安装的 MySQL 版本："
+    echo "1) MySQL 5.7"
+    echo "2) MySQL 8.0"
+    read -p "输入选项编号(1或2): " version_choice
+
+    case $version_choice in
+        1)
+            # 用户选择MySQL5.7时重新配置mysql-apt-config
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y debconf-utils
+            # 设置mysql-apt-config选择5.7
+            sudo debconf-set-selections <<< "mysql-apt-config mysql-apt-config/select-server select mysql-5.7"
+            sudo DEBIAN_FRONTEND=noninteractive dpkg-reconfigure mysql-apt-config
+            sudo apt-get update -y
+            sudo apt-get install -y mysql-server
+            ;;
+        2)
+            # 用户选择MySQL8.0时重新配置mysql-apt-config
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y debconf-utils
+            sudo debconf-set-selections <<< "mysql-apt-config mysql-apt-config/select-server select mysql-8.0"
+            sudo DEBIAN_FRONTEND=noninteractive dpkg-reconfigure mysql-apt-config
+            sudo apt-get update -y
+            sudo apt-get install -y mysql-server
+            ;;
+        *)
+            echo "无效的选项."
+            return 1
+            ;;
+    esac
+
+    # 设置root密码
+    set_mysql_root_password
+}
+
+set_mysql_root_password() {
+    read -sp "请为 MySQL root 用户设置密码: " MYSQL_PASSWORD
+    echo
+    run_mysql_secure_installation
+    MYSQL_CMD="mysql -u$MYSQL_USER -p$MYSQL_PASSWORD"
 }
 
 # 添加数据库
@@ -145,9 +156,9 @@ manage_database() {
 
     echo "管理选项："
     echo "1) 查看数据表列表"
-    echo "2) 新增数据表(需要手动输入SQL)"
-    echo "3) 修改数据表结构(需要手动输入ALTER SQL)"
-    echo "4) 查看数据记录(需要SELECT查询)"
+    echo "2) 新增数据表(输入CREATE TABLE语句)"
+    echo "3) 修改数据表结构(输入ALTER TABLE语句)"
+    echo "4) 查看数据记录(输入SELECT查询)"
     echo "0) 返回上级菜单"
     read -p "请输入选项: " manage_choice
 
@@ -234,6 +245,7 @@ main_menu() {
 
 # 主逻辑开始
 check_and_install_dependencies
-# 如需设置 MySQL APT 源，可在此调用 set_mysql_apt_repo 函数
-# set_mysql_apt_repo
+# 设置MySQL APT源
+set_mysql_apt_repo
+# 进入主菜单
 main_menu
