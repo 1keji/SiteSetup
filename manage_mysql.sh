@@ -3,9 +3,9 @@
 # MySQL 管理脚本
 # 支持安装、添加数据库、管理数据库和卸载 MySQL
 
-# 检查是否以root用户运行
+# 检查是否以 root 用户运行
 if [ "$EUID" -ne 0 ]; then
-  echo "请以root用户运行此脚本。使用sudo ./mysql_manager.sh"
+  echo "请以 root 用户运行此脚本。使用 sudo ./mysql_manager.sh"
   exit 1
 fi
 
@@ -41,11 +41,16 @@ install_mysql() {
   echo "安装依赖项..."
   apt install -y wget lsb-release gnupg debconf-utils
 
-  # 下载最新的 MySQL APT 配置包
-  echo "下载 MySQL APT 配置包..."
-  wget https://dev.mysql.com/get/mysql-apt-config_latest_all.deb -O /tmp/mysql-apt-config_latest_all.deb
+  # 下载 MySQL APT 配置包
+  # 更新此处的版本号为当前最新版本
+  MYSQL_APT_CONFIG_VERSION="0.8.24-1"
+  MYSQL_APT_CONFIG_URL="https://dev.mysql.com/get/mysql-apt-config_${MYSQL_APT_CONFIG_VERSION}_all.deb"
+  MYSQL_APT_CONFIG_DEB="/tmp/mysql-apt-config_${MYSQL_APT_CONFIG_VERSION}_all.deb"
 
-  if [ ! -f /tmp/mysql-apt-config_latest_all.deb ]; then
+  echo "下载 MySQL APT 配置包 (${MYSQL_APT_CONFIG_URL})..."
+  wget "$MYSQL_APT_CONFIG_URL" -O "$MYSQL_APT_CONFIG_DEB"
+
+  if [ ! -f "$MYSQL_APT_CONFIG_DEB" ]; then
     echo "下载 MySQL APT 配置包失败。请检查网络连接或 URL 是否正确。"
     return
   fi
@@ -57,7 +62,7 @@ install_mysql() {
 
   # 安装 MySQL APT 配置包
   echo "安装 MySQL APT 配置包..."
-  DEBIAN_FRONTEND=noninteractive dpkg -i /tmp/mysql-apt-config_latest_all.deb
+  DEBIAN_FRONTEND=noninteractive dpkg -i "$MYSQL_APT_CONFIG_DEB"
 
   if [ $? -ne 0 ]; then
     echo "安装 MySQL APT 配置包失败。"
@@ -82,30 +87,47 @@ install_mysql() {
 
   # 设置 MySQL root 密码并进行安全配置
   echo "设置 MySQL root 密码并进行安全配置..."
-  
-  # 检查是否安装了 mysql_secure_installation
-  if ! command -v mysql_secure_installation &> /dev/null; then
-    echo "mysql_secure_installation 未找到，尝试安装..."
-    apt install -y mysql_secure_installation
-    if [ $? -ne 0 ]; then
-      echo "安装 mysql_secure_installation 失败。请手动运行 'mysql_secure_installation' 进行配置。"
-      return
-    fi
+
+  # 允许用户自定义 MySQL root 密码
+  read -s -p "请输入 MySQL root 用户的新密码： " MYSQL_ROOT_PASSWORD
+  echo
+  read -s -p "请再次输入 MySQL root 用户的新密码以确认： " MYSQL_ROOT_PASSWORD_CONFIRM
+  echo
+
+  if [ "$MYSQL_ROOT_PASSWORD" != "$MYSQL_ROOT_PASSWORD_CONFIRM" ]; then
+    echo "两次输入的密码不一致。取消安装。"
+    return
   fi
 
-  # 自动执行 mysql_secure_installation
+  # 使用 debconf 配置密码
+  echo "mysql-server mysql-server/root_password password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
+  echo "mysql-server mysql-server/root_password_again password $MYSQL_ROOT_PASSWORD" | debconf-set-selections
+
+  # 重新安装 mysql-server 以应用密码设置
+  DEBIAN_FRONTEND=noninteractive apt install -y mysql-server
+
+  # 运行 mysql_secure_installation
+  echo "运行 mysql_secure_installation 以完成安全配置..."
   mysql_secure_installation <<EOF
 
 y
-$DEFAULT_MYSQL_ROOT_PASSWORD
-$DEFAULT_MYSQL_ROOT_PASSWORD
+$MYSQL_ROOT_PASSWORD
+$MYSQL_ROOT_PASSWORD
 y
 y
 y
 y
 EOF
 
-  echo "MySQL $MYSQL_VERSION 安装完成。"
+  if [ $? -eq 0 ]; then
+    echo "MySQL $MYSQL_VERSION 安装完成。"
+    DEFAULT_MYSQL_ROOT_PASSWORD="$MYSQL_ROOT_PASSWORD"
+  else
+    echo "MySQL 安装完成，但运行 mysql_secure_installation 时出现错误。请手动完成安全配置。"
+  fi
+
+  # 清理下载的 APT 配置包
+  rm -f "$MYSQL_APT_CONFIG_DEB"
 }
 
 # 函数：添加数据库
