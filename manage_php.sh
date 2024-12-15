@@ -6,6 +6,9 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+# 定义默认禁用的高危函数
+DEFAULT_DISABLED_FUNCTIONS=("exec" "passthru" "shell_exec" "system" "proc_open" "popen" "pcntl_exec" "putenv" "getenv" "curl_exec" "curl_multi_exec" "parse_ini_file" "show_source" "proc_get_status" "proc_terminate" "proc_nice" "dl")
+
 # 检测操作系统类型
 detect_os() {
     if [ -f /etc/os-release ]; then
@@ -122,6 +125,7 @@ install_php_menu() {
                 apt install -y php$version php$version-cli php$version-fpm
                 if [[ $? -eq 0 ]]; then
                     echo "PHP $version 安装成功。"
+                    disable_default_functions "$version"
                 else
                     echo "PHP $version 安装失败。"
                 fi
@@ -132,6 +136,42 @@ install_php_menu() {
             echo "无效的选择: $sel，跳过。"
         fi
     done
+}
+
+# 禁用默认高危函数
+disable_default_functions() {
+    local version="$1"
+    local php_ini
+    php_ini=$(get_php_ini "$version")
+    if [[ -z "$php_ini" ]]; then
+        echo "未找到 PHP $version 的 php.ini 文件，无法禁用函数。"
+        return
+    fi
+
+    echo "正在禁用默认高危函数..."
+    
+    # 获取当前禁用的函数
+    current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ' | tr ',' ' ')
+
+    for func in "${DEFAULT_DISABLED_FUNCTIONS[@]}"; do
+        if echo "$current_disabled" | grep -qw "$func"; then
+            echo "函数 $func 已经被禁用，跳过。"
+        else
+            if grep -q "^disable_functions" "$php_ini"; then
+                # Append function
+                sed -i "/^disable_functions\s*=/ s/$/,${func}/" "$php_ini"
+            else
+                # Add disable_functions line
+                echo "disable_functions = ${func}" >> "$php_ini"
+            fi
+            echo "函数 $func 已被禁用。"
+            # Update current_disabled variable
+            current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ' | tr ',' ' ')
+        fi
+    done
+
+    # 重启 PHP-FPM 服务
+    restart_php_fpm "$version"
 }
 
 # 管理 PHP 菜单
@@ -269,8 +309,8 @@ disable_php_functions() {
     fi
     
     # 获取当前禁用的函数
-    current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ')
-
+    current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ' | tr ',' ' ')
+    
     if [[ -n "$current_disabled" ]]; then
         echo "当前已禁用的函数：$current_disabled"
     else
@@ -298,7 +338,7 @@ disable_php_functions() {
             fi
             echo "函数 $func_trimmed 已被禁用。"
             # 更新当前禁用的函数变量
-            current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ')
+            current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ' | tr ',' ' ')
         fi
     done
     
@@ -318,7 +358,7 @@ enable_php_functions() {
     fi
     
     # 获取当前禁用的函数
-    current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ')
+    current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ' | tr ',' ' ')
     
     if [[ -n "$current_disabled" ]]; then
         echo "当前已禁用的函数：$current_disabled"
@@ -333,6 +373,7 @@ enable_php_functions() {
     for func in "${functions[@]}"; do
         func_trimmed=$(echo "$func" | xargs) # 去除空格
         if echo "$current_disabled" | grep -qw "$func_trimmed"; then
+            # Remove the function from the disable_functions list
             new_disabled=$(echo "$current_disabled" | sed "s/\b$func_trimmed\b//g" | sed 's/,,/,/g' | sed 's/^,//' | sed 's/,$//')
             if [[ -z "$new_disabled" ]]; then
                 # 删除 disable_functions 行
