@@ -1,207 +1,214 @@
 #!/bin/bash
 
 # MySQL 管理脚本
+# 需要以 root 或具有 sudo 权限的用户运行
 
-set -e
-
-# 检测操作系统类型
-detect_os() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS=$ID
-        VER=$VERSION_ID
-    else
-        echo "无法检测操作系统类型。"
-        exit 1
-    fi
-}
-
-# 安装依赖项
-install_dependencies() {
-    echo "安装必要的依赖项..."
-
-    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
-        sudo apt update
-        sudo apt install -y wget lsb-release gnupg curl
-    elif [[ "$OS" == "centos" || "$OS" == "rhel" || "$OS" == "fedora" ]]; then
-        if [[ "$OS" == "centos" || "$OS" == "rhel" ]]; then
-            sudo yum install -y wget curl
-        else
-            sudo dnf install -y wget curl
+# 检查 Docker 是否安装
+function check_docker() {
+    if ! command -v docker &> /dev/null
+    then
+        echo "Docker 未安装。正在安装 Docker..."
+        # 安装 Docker（适用于基于 Debian/Ubuntu 的系统）
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh
+        rm get-docker.sh
+        if ! command -v docker &> /dev/null
+        then
+            echo "Docker 安装失败。请手动安装 Docker 后重试。"
+            exit 1
         fi
-    else
-        echo "不支持的操作系统。"
-        exit 1
+        echo "Docker 安装成功。"
     fi
-}
-
-# 添加 MySQL 仓库的 GPG 公钥
-add_mysql_gpg_key() {
-    echo "添加 MySQL 仓库的 GPG 公钥..."
-    wget https://repo.mysql.com/RPM-GPG-KEY-mysql-2022 -O mysql_gpg_key
-    sudo mkdir -p /usr/share/keyrings
-    sudo gpg --dearmor mysql_gpg_key | sudo tee /usr/share/keyrings/mysql-archive-keyring.gpg > /dev/null
-    rm mysql_gpg_key
 }
 
 # 安装 MySQL
-install_mysql() {
-    echo "请选择要安装的 MySQL 版本："
-    echo "1) MySQL 5.7"
-    echo "2) MySQL 8.0"
-    read -p "请输入数字选择版本: " version_choice
-
-    case $version_choice in
-        1)
-            MYSQL_VERSION="5.7"
-            ;;
-        2)
-            MYSQL_VERSION="8.0"
-            ;;
-        *)
-            echo "无效的选择。返回主菜单。"
-            return
-            ;;
-    esac
-
-    echo "选择的 MySQL 版本: $MYSQL_VERSION"
-
-    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
-        # 添加 MySQL APT 仓库
-        wget https://dev.mysql.com/get/mysql-apt-config_0.8.24-1_all.deb
-        sudo dpkg -i mysql-apt-config_0.8.24-1_all.deb
-
-        # 自动选择 MySQL 版本
-        # 需要使用 debconf-set-selections 预先配置选项
-        # 由于复杂性，这里提示用户手动选择
-        echo "请在弹出的界面中选择 MySQL $MYSQL_VERSION 并确认。"
-        sudo dpkg-reconfigure mysql-apt-config
-
-        # 更新包列表
-        sudo apt update
-
-        # 安装 MySQL 服务器
-        sudo apt install -y mysql-server
-
-        # 清理
-        rm mysql-apt-config_0.8.24-1_all.deb
-
-    elif [[ "$OS" == "centos" || "$OS" == "rhel" ]]; then
-        if [[ "$VER" == "8" ]]; then
-            wget https://repo.mysql.com/mysql80-community-release-el8-3.noarch.rpm
-            sudo rpm -Uvh mysql80-community-release-el8-3.noarch.rpm
-            rm mysql80-community-release-el8-3.noarch.rpm
-        elif [[ "$VER" == "7" ]]; then
-            wget https://repo.mysql.com/mysql57-community-release-el7-11.noarch.rpm
-            sudo rpm -Uvh mysql57-community-release-el7-11.noarch.rpm
-            rm mysql57-community-release-el7-11.noarch.rpm
-        else
-            echo "不支持的 CentOS/RHEL 版本。"
-            return
-        fi
-
-        if [[ "$MYSQL_VERSION" == "5.7" ]]; then
-            sudo yum-config-manager --disable mysql80-community
-            sudo yum-config-manager --enable mysql57-community
-        elif [[ "$MYSQL_VERSION" == "8.0" ]]; then
-            sudo yum-config-manager --disable mysql57-community
-            sudo yum-config-manager --enable mysql80-community
-        fi
-
-        sudo yum install -y mysql-server
-    else
-        echo "不支持的操作系统。"
+function install_mysql() {
+    echo "请选择要安装的 MySQL 版本（例如 5.7, 8.0）："
+    read -p "版本: " mysql_version
+    if [[ -z "$mysql_version" ]]; then
+        echo "未输入版本号，安装已取消。"
         return
     fi
 
-    echo "MySQL $MYSQL_VERSION 安装完成。"
+    read -p "请输入持久化挂载路径（默认: /root/.docker/mysql）: " mount_path
+    mount_path=${mount_path:-/root/.docker/mysql}
 
-    # 启动并设置 MySQL 开机自启
-    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
-        sudo systemctl start mysql
-        sudo systemctl enable mysql
-    elif [[ "$OS" == "centos" || "$OS" == "rhel" ]]; then
-        sudo systemctl start mysqld
-        sudo systemctl enable mysqld
+    read -p "请输入端口号（默认: 3306）: " port
+    port=${port:-3306}
+
+    read -s -p "请输入 MySQL root 用户密码: " root_password
+    echo
+    if [[ -z "$root_password" ]]; then
+        echo "未设置 root 密码，安装已取消。"
+        return
     fi
 
-    # 获取临时密码（适用于 MySQL 5.7）
-    if [[ "$MYSQL_VERSION" == "5.7" && "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
-        TEMP_PWD=$(sudo grep 'temporary password' /var/log/mysql/error.log | awk '{print $NF}')
-        echo "MySQL 临时密码: $TEMP_PWD"
-        echo "请使用以下命令更改密码:"
-        echo "sudo mysql_secure_installation"
-    elif [[ "$MYSQL_VERSION" == "5.7" && ("$OS" == "centos" || "$OS" == "rhel") ]]; then
-        TEMP_PWD=$(sudo grep 'temporary password' /var/log/mysqld.log | awk '{print $NF}')
-        echo "MySQL 临时密码: $TEMP_PWD"
-        echo "请使用以下命令更改密码:"
-        echo "sudo mysql_secure_installation"
+    # 检查端口是否被占用
+    if lsof -i:$port &> /dev/null
+    then
+        echo "端口 $port 已被占用，请选择其他端口。"
+        return
+    fi
+
+    # 创建挂载目录
+    mkdir -p "$mount_path"
+
+    # 运行 Docker 容器
+    docker run -d \
+    --name mysql-docker \
+    -p ${port}:3306 \
+    -e MYSQL_ROOT_PASSWORD=${root_password} \
+    -v ${mount_path}:/var/lib/mysql \
+    mysql:${mysql_version}
+
+    if [ $? -eq 0 ]; then
+        echo "MySQL ${mysql_version} 安装并运行成功。"
+    else
+        echo "MySQL 安装失败。"
     fi
 }
 
-# 查询 MySQL 状态
-query_status() {
-    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
-        sudo systemctl status mysql --no-pager
-    elif [[ "$OS" == "centos" || "$OS" == "rhel" || "$OS" == "fedora" ]]; then
-        sudo systemctl status mysqld --no-pager
-    else
-        echo "不支持的操作系统。"
+# 添加数据库
+function add_database() {
+    # 检查 MySQL 容器是否运行
+    if ! docker ps | grep -q mysql-docker
+    then
+        echo "MySQL 容器未运行，请先安装并启动 MySQL。"
+        return
     fi
+
+    read -p "请输入要创建的数据库名称: " db_name
+    if [[ -z "$db_name" ]]; then
+        echo "未输入数据库名称，操作已取消。"
+        return
+    fi
+
+    read -s -p "请输入 MySQL root 用户密码: " root_password
+    echo
+
+    docker exec -i mysql-docker mysql -uroot -p${root_password} -e "CREATE DATABASE ${db_name};"
+
+    if [ $? -eq 0 ]; then
+        echo "数据库 '${db_name}' 创建成功。"
+    else
+        echo "数据库创建失败。请检查密码是否正确或数据库是否已存在。"
+    fi
+}
+
+# 管理数据库
+function manage_database() {
+    # 检查 MySQL 容器是否运行
+    if ! docker ps | grep -q mysql-docker
+    then
+        echo "MySQL 容器未运行，请先安装并启动 MySQL。"
+        return
+    fi
+
+    echo "请选择操作："
+    echo "1. 查看所有数据库"
+    echo "2. 删除数据库"
+    echo "3. 重命名数据库"
+    echo "0. 返回主菜单"
+    read -p "选择: " manage_choice
+
+    case $manage_choice in
+        1)
+            read -s -p "请输入 MySQL root 用户密码: " root_password
+            echo
+            docker exec -i mysql-docker mysql -uroot -p${root_password} -e "SHOW DATABASES;"
+            ;;
+        2)
+            read -p "请输入要删除的数据库名称: " db_name
+            if [[ -z "$db_name" ]]; then
+                echo "未输入数据库名称，操作已取消。"
+                return
+            fi
+            read -s -p "请输入 MySQL root 用户密码: " root_password
+            echo
+            docker exec -i mysql-docker mysql -uroot -p${root_password} -e "DROP DATABASE ${db_name};"
+            if [ $? -eq 0 ]; then
+                echo "数据库 '${db_name}' 删除成功。"
+            else
+                echo "删除数据库失败。请检查名称是否正确。"
+            fi
+            ;;
+        3)
+            read -p "请输入要重命名的数据库名称: " old_db
+            read -p "请输入新数据库名称: " new_db
+            if [[ -z "$old_db" || -z "$new_db" ]]; then
+                echo "输入不完整，操作已取消。"
+                return
+            fi
+            read -s -p "请输入 MySQL root 用户密码: " root_password
+            echo
+            # MySQL 不支持直接重命名数据库，需要导出和导入
+            docker exec -i mysql-docker mysqldump -uroot -p${root_password} ${old_db} > /tmp/${old_db}.sql
+            docker exec -i mysql-docker mysql -uroot -p${root_password} -e "CREATE DATABASE ${new_db};"
+            docker exec -i mysql-docker mysql -uroot -p${root_password} ${new_db} < /tmp/${old_db}.sql
+            docker exec -i mysql-docker mysql -uroot -p${root_password} -e "DROP DATABASE ${old_db};"
+            rm -f /tmp/${old_db}.sql
+            if [ $? -eq 0 ]; then
+                echo "数据库 '${old_db}' 重命名为 '${new_db}' 成功。"
+            else
+                echo "重命名数据库失败。"
+            fi
+            ;;
+        0)
+            return
+            ;;
+        *)
+            echo "无效的选择。"
+            ;;
+    esac
 }
 
 # 卸载 MySQL
-uninstall_mysql() {
-    read -p "请输入确认文字以卸载 MySQL 数据库: " confirm_text
-
-    if [[ "$confirm_text" != "确认卸载mysql数据库" ]]; then
-        echo "确认文字不正确，取消卸载。"
+function uninstall_mysql() {
+    read -p "确定要卸载 MySQL 吗？输入 '卸载' 以确认: " confirm
+    if [[ "$confirm" != "卸载" ]]; then
+        echo "确认失败，卸载已取消。"
         return
     fi
 
-    echo "开始卸载 MySQL..."
+    # 停止并移除容器
+    docker stop mysql-docker
+    docker rm mysql-docker
 
-    if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
-        sudo systemctl stop mysql
-        sudo apt purge -y mysql-server mysql-client mysql-common
-        sudo rm -rf /etc/mysql /var/lib/mysql
-        sudo apt autoremove -y
-        sudo apt autoclean
-    elif [[ "$OS" == "centos" || "$OS" == "rhel" ]]; then
-        sudo systemctl stop mysqld
-        sudo yum remove -y mysql-server
-        sudo rm -rf /var/lib/mysql /etc/my.cnf
-    else
-        echo "不支持的操作系统。"
-        return
+    # 可选择是否删除挂载的卷
+    read -p "是否删除持久化数据目录？(y/N): " delete_volume
+    if [[ "$delete_volume" =~ ^[Yy]$ ]]; then
+        read -p "请输入持久化挂载路径（默认: /root/.docker/mysql）: " mount_path
+        mount_path=${mount_path:-/root/.docker/mysql}
+        rm -rf "$mount_path"
+        echo "持久化数据目录已删除。"
     fi
 
     echo "MySQL 已成功卸载。"
 }
 
 # 主菜单
-main_menu() {
-    while true; do
-        echo "=============================="
-        echo " MySQL 管理脚本"
-        echo "=============================="
-        echo "1) 安装 MySQL"
-        echo "2) 查询数据库状态"
-        echo "3) 卸载 MySQL 数据库"
-        echo "0) 退出脚本"
-        echo "=============================="
-        read -p "请输入您的选择: " choice
-
+function main_menu() {
+    while true
+    do
+        echo "================ MySQL 管理脚本 ================"
+        echo "1. 安装 MySQL"
+        echo "2. 添加数据库"
+        echo "3. 管理数据库"
+        echo "4. 卸载 MySQL"
+        echo "0. 退出"
+        echo "==============================================="
+        read -p "请选择一个选项: " choice
         case $choice in
             1)
-                install_dependencies
-                add_mysql_gpg_key
                 install_mysql
                 ;;
             2)
-                query_status
+                add_database
                 ;;
             3)
+                manage_database
+                ;;
+            4)
                 uninstall_mysql
                 ;;
             0)
@@ -212,11 +219,12 @@ main_menu() {
                 echo "无效的选择，请重新输入。"
                 ;;
         esac
-
-        echo ""
+        echo
     done
 }
 
-# 执行脚本
-detect_os
+# 检查依赖项
+check_docker
+
+# 运行主菜单
 main_menu
