@@ -172,6 +172,10 @@ configure_reverse_proxy() {
 
   read -p "请输入反向代理的目标地址（例如 http://localhost:3000 或 https://localhost:3000）： " TARGET
 
+  # 设置上传文件大小
+  read -p "请输入允许上传文件的最大大小（例如 10M，默认 50M）： " UPLOAD_SIZE
+  UPLOAD_SIZE=${UPLOAD_SIZE:-50M}
+
   CONFIG_PATH="/etc/nginx/sites-available/$DOMAIN"
   ENABLED_PATH="/etc/nginx/sites-enabled/$DOMAIN"
 
@@ -181,6 +185,8 @@ server {
     listen 80;
     listen [::]:80;
     server_name $DOMAIN;
+
+    client_max_body_size $UPLOAD_SIZE;
 
     location / {
         proxy_pass $TARGET;
@@ -244,6 +250,10 @@ add_website() {
   read -p "请输入网站的根目录路径（默认 /var/www/$DOMAIN/html）： " DOCUMENT_ROOT
   DOCUMENT_ROOT=${DOCUMENT_ROOT:-"/var/www/$DOMAIN/html"}
 
+  # 设置上传文件大小
+  read -p "请输入允许上传文件的最大大小（例如 10M，默认 50M）： " UPLOAD_SIZE
+  UPLOAD_SIZE=${UPLOAD_SIZE:-50M}
+
   echo "检测已安装的PHP版本..."
   detect_installed_php_versions
 
@@ -283,6 +293,8 @@ server {
     listen [::]:80;
     server_name $DOMAIN;
 
+    client_max_body_size $UPLOAD_SIZE;
+
     root $DOCUMENT_ROOT;
     index index.php index.html index.htm;
 
@@ -306,6 +318,8 @@ server {
     listen 80;
     listen [::]:80;
     server_name $DOMAIN;
+
+    client_max_body_size $UPLOAD_SIZE;
 
     root $DOCUMENT_ROOT;
     index index.html index.htm;
@@ -421,6 +435,13 @@ modify_website() {
     return
   fi
 
+  # 获取当前上传文件大小
+  CURRENT_UPLOAD_SIZE=$(grep -E '^\s*client_max_body_size\s+' "$CONFIG_PATH" | awk '{print $2}' | tr -d ';')
+  if [ -z "$CURRENT_UPLOAD_SIZE" ]; then
+    CURRENT_UPLOAD_SIZE="未设置"
+  fi
+  echo "当前允许上传文件的最大大小：$CURRENT_UPLOAD_SIZE"
+
   # 询问修改类型
   echo "请选择要修改的内容："
   echo "1. 网站类型（反向代理或目录服务）"
@@ -430,8 +451,9 @@ modify_website() {
   echo "5. TLS设置"
   echo "6. 设置网站目录权限"
   echo "7. 指定网站运行目录"
+  echo "8. 修改允许上传文件的大小"
   echo "0. 返回主菜单"
-  read -p "请输入选项 [0-7]: " modify_choice
+  read -p "请输入选项 [0-8]: " modify_choice
 
   case $modify_choice in
     1)
@@ -452,12 +474,18 @@ modify_website() {
           read -p "请输入新的反向代理的目标地址（例如 http://localhost:3000）： " NEW_TARGET
           read -p "请输入用于 TLS 证书的邮箱地址： " EMAIL
 
+          # 设置上传文件大小
+          read -p "请输入允许上传文件的最大大小（例如 10M，默认 50M）： " NEW_UPLOAD_SIZE
+          NEW_UPLOAD_SIZE=${NEW_UPLOAD_SIZE:-50M}
+
           # 重写配置
           cat > "$CONFIG_PATH" <<EOF
 server {
     listen 80;
     listen [::]:80;
     server_name $SELECTED_WEBSITE;
+
+    client_max_body_size $NEW_UPLOAD_SIZE;
 
     location / {
         proxy_pass $NEW_TARGET;
@@ -508,6 +536,10 @@ EOF
             done
           fi
 
+          # 设置上传文件大小
+          read -p "请输入允许上传文件的最大大小（例如 10M，默认 50M）： " NEW_UPLOAD_SIZE
+          NEW_UPLOAD_SIZE=${NEW_UPLOAD_SIZE:-50M}
+
           if [ -n "$NEW_PHP_VERSION" ]; then
             install_php "$NEW_PHP_VERSION"
             if [ $? -ne 0 ]; then
@@ -520,6 +552,8 @@ server {
     listen 80;
     listen [::]:80;
     server_name $SELECTED_WEBSITE;
+
+    client_max_body_size $NEW_UPLOAD_SIZE;
 
     root $NEW_DOCUMENT_ROOT;
     index index.php index.html index.htm;
@@ -544,6 +578,8 @@ server {
     listen 80;
     listen [::]:80;
     server_name $SELECTED_WEBSITE;
+
+    client_max_body_size $NEW_UPLOAD_SIZE;
 
     root $NEW_DOCUMENT_ROOT;
     index index.html index.htm;
@@ -579,7 +615,7 @@ EOF
       # 修改目录服务的根目录路径
       if grep -q "root " "$CONFIG_PATH"; then
         read -p "请输入新的网站根目录路径（例如 /var/www/example.com/html）： " NEW_DOCUMENT_ROOT
-        sed -i "s|root .*;|root $NEW_DOCUMENT_ROOT;|" "$CONFIG_PATH"
+        sed -i "s|^\s*root\s\+.*;|root $NEW_DOCUMENT_ROOT;|" "$CONFIG_PATH"
       else
         echo "当前不是目录服务配置。"
         return
@@ -673,7 +709,7 @@ EOF
       chown -R www-data:www-data "$NEW_RUNNING_DIR"
 
       # 更新Nginx配置
-      sed -i "s|root .*;|root $NEW_RUNNING_DIR;|" "$CONFIG_PATH"
+      sed -i "s|^\s*root\s\+.*;|root $NEW_RUNNING_DIR;|" "$CONFIG_PATH"
 
       echo "运行目录已更新为 $NEW_RUNNING_DIR。"
 
@@ -689,6 +725,25 @@ EOF
       systemctl reload nginx
 
       echo "运行目录指定完成！你的网站现在可以通过 https://$SELECTED_WEBSITE 访问。"
+      ;;
+    8)
+      # 修改允许上传文件的大小
+      read -p "请输入新的允许上传文件的最大大小（例如 10M）： " NEW_UPLOAD_SIZE
+      if [ -z "$NEW_UPLOAD_SIZE" ]; then
+        echo "输入不能为空。"
+        return
+      fi
+
+      # 检查是否已经存在 client_max_body_size 指令
+      if grep -q '^\s*client_max_body_size\s\+' "$CONFIG_PATH"; then
+        # 使用 POSIX 字符类替代 \s
+        sed -i "s|^[[:space:]]*client_max_body_size[[:space:]]\+.*;|    client_max_body_size $NEW_UPLOAD_SIZE;|" "$CONFIG_PATH"
+        echo "已将允许上传文件的最大大小修改为 $NEW_UPLOAD_SIZE。"
+      else
+        # 在 server 块的开头添加 client_max_body_size 指令
+        sed -i "/server {/a \    client_max_body_size $NEW_UPLOAD_SIZE;" "$CONFIG_PATH"
+        echo "已添加允许上传文件的最大大小为 $NEW_UPLOAD_SIZE。"
+      fi
       ;;
     0)
       echo "返回主菜单。"
@@ -713,9 +768,6 @@ EOF
 
   echo "配置修改完成！你的网站现在可以通过 https://$SELECTED_WEBSITE 访问。"
 }
-
-# 设置网站目录权限（已整合到 modify_website 中）
-# specify_running_directory 也已整合到 modify_website 中
 
 # 卸载Nginx及相关配置
 uninstall_nginx() {
