@@ -76,8 +76,13 @@ get_installed_php_versions() {
 # 主菜单
 main_menu() {
     while true; do
-        echo "=============================="
-        echo "        PHP 管理脚本"
+        echo "╔═══════════════════════════════════════════════╗"
+        echo "║            一点科技 php 管理脚本              ║"
+        echo "╠═══════════════════════════════════════════════╣"
+        echo "║ 作者：1点科技                                 ║"
+        echo "║ 网站：https://1keji.net                       ║"
+        echo "║ YouTube：https://www.youtube.com/@1keji_net   ║"
+        echo "╚═══════════════════════════════════════════════╝"
         echo "=============================="
         echo "1. 安装 PHP"
         echo "2. 管理 PHP"
@@ -113,7 +118,7 @@ install_php_menu() {
     for i in "${!available_versions[@]}"; do
         echo "$((i+1)). PHP ${available_versions[i]}"
     done
-    echo "$(( ${#available_versions[@]} +1 )). 返回主菜单"
+    echo "$(( ${#available_versions[@]} +1 ))). 返回主菜单"
     read -p "请选择要安装的 PHP 版本（可以多选，用空格分隔）: " -a selections
     for sel in "${selections[@]}"; do
         if [[ "$sel" -ge 1 && "$sel" -le "${#available_versions[@]}" ]]; then
@@ -185,7 +190,7 @@ manage_php_menu() {
     for i in "${!installed_versions[@]}"; do
         echo "$((i+1)). PHP ${installed_versions[i]}"
     done
-    echo "$(( ${#installed_versions[@]} +1 )). 返回主菜单"
+    echo "$(( ${#installed_versions[@]} +1 ))). 返回主菜单"
     read -p "请选择要管理的 PHP 版本: " sel
     if [[ "$sel" -ge 1 && "$sel" -le "${#installed_versions[@]}" ]]; then
         version="${installed_versions[$((sel-1))]}"
@@ -474,7 +479,7 @@ uninstall_php_menu() {
     for i in "${!installed_versions[@]}"; do
         echo "$((i+1)). PHP ${installed_versions[i]}"
     done
-    echo "$(( ${#installed_versions[@]} +1 )). 返回主菜单"
+    echo "$(( ${#installed_versions[@]} +1 ))). 返回主菜单"
     read -p "请选择要卸载的 PHP 版本: " sel
     if [[ "$sel" -ge 1 && "$sel" -le "${#installed_versions[@]}" ]]; then
         version="${installed_versions[$((sel-1))]}"
