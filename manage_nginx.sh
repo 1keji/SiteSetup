@@ -123,6 +123,22 @@ install_php() {
   fi
 }
 
+# 安装 Certbot
+install_certbot() {
+  if ! command -v certbot >/dev/null 2>&1; then
+    echo "正在安装 Certbot..."
+    apt update
+    apt install -y certbot python3-certbot-nginx
+    if [ $? -ne 0 ]; then
+      echo "安装 Certbot 失败。请手动安装 Certbot 并重试。"
+      exit 1
+    fi
+    echo "Certbot 安装完成。"
+  else
+    echo "Certbot 已经安装。"
+  fi
+}
+
 # 安装Nginx
 install_nginx() {
   echo "更新系统包..."
@@ -196,6 +212,9 @@ EOF
 
   echo "重新加载 Nginx..."
   systemctl reload nginx
+
+  echo "安装 Certbot 以申请 TLS 证书..."
+  install_certbot
 
   echo "申请 Let's Encrypt TLS 证书..."
   certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect
@@ -321,6 +340,9 @@ EOF
   echo "重新加载 Nginx..."
   systemctl reload nginx
 
+  echo "安装 Certbot 以申请 TLS 证书..."
+  install_certbot
+
   echo "申请 Let's Encrypt TLS 证书..."
   if [ -n "$PHP_VERSION" ]; then
     certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect
@@ -333,6 +355,10 @@ EOF
       rm "/etc/nginx/sites-enabled/$DOMAIN"
       return
   fi
+
+  echo "设置自动续期..."
+  systemctl enable certbot.timer
+  systemctl start certbot.timer
 
   echo "网站配置完成！你的网站现在可以通过 https://$DOMAIN 访问。"
 }
@@ -594,6 +620,7 @@ EOF
       read -p "是否要更新TLS证书？ (y/n): " tls_choice
       if [[ "$tls_choice" == "y" || "$tls_choice" == "Y" ]]; then
         read -p "请输入用于 TLS 证书的邮箱地址： " EMAIL
+        install_certbot
         certbot --nginx -d "$SELECTED_WEBSITE" --non-interactive --agree-tos -m "$EMAIL" --redirect
         if [ $? -ne 0 ]; then
             echo "Certbot 申请证书失败。请检查域名的 DNS 设置是否正确。"
