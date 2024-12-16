@@ -113,7 +113,7 @@ install_php_menu() {
     for i in "${!available_versions[@]}"; do
         echo "$((i+1)). PHP ${available_versions[i]}"
     done
-    echo "$(( ${#available_versions[@]} +1 ))). 返回主菜单"
+    echo "$(( ${#available_versions[@]} +1 )). 返回主菜单"
     read -p "请选择要安装的 PHP 版本（可以多选，用空格分隔）: " -a selections
     for sel in "${selections[@]}"; do
         if [[ "$sel" -ge 1 && "$sel" -le "${#available_versions[@]}" ]]; then
@@ -161,7 +161,6 @@ disable_default_functions() {
                 # Append function
                 sed -i "/^disable_functions\s*=/ s/$/,${func}/" "$php_ini"
             else
-                # Add disable_functions line
                 echo "disable_functions = ${func}" >> "$php_ini"
             fi
             echo "函数 $func 已被禁用。"
@@ -186,7 +185,7 @@ manage_php_menu() {
     for i in "${!installed_versions[@]}"; do
         echo "$((i+1)). PHP ${installed_versions[i]}"
     done
-    echo "$(( ${#installed_versions[@]} +1 ))). 返回主菜单"
+    echo "$(( ${#installed_versions[@]} +1 )). 返回主菜单"
     read -p "请选择要管理的 PHP 版本: " sel
     if [[ "$sel" -ge 1 && "$sel" -le "${#installed_versions[@]}" ]]; then
         version="${installed_versions[$((sel-1))]}"
@@ -209,6 +208,7 @@ php_manage_menu() {
         echo "2. 卸载扩展"
         echo "3. 禁用函数"
         echo "4. 解除禁用函数"
+        echo "5. 设置上传文件大小限制"
         echo "0. 返回上级菜单"
         echo "=============================="
         read -p "请输入选项: " choice
@@ -228,11 +228,49 @@ php_manage_menu() {
             4)
                 enable_php_functions "$version"
                 ;;
+            5)
+                set_upload_file_size "$version"
+                ;;
             *)
                 echo "无效的选项，请重新选择。"
                 ;;
         esac
     done
+}
+
+# 设置 PHP 上传文件大小限制
+set_upload_file_size() {
+    local version="$1"
+    php_ini=$(get_php_ini "$version")
+    if [[ -z "$php_ini" ]]; then
+        echo "未找到 PHP $version 的 php.ini 文件。无法设置上传文件大小限制。"
+        return
+    fi
+    echo "当前 PHP $version 的 upload_max_filesize 和 post_max_size 设置如下："
+    current_upload_size=$(grep -E "^[; ]*upload_max_filesize" "$php_ini" | awk '{print $3}')
+    current_post_size=$(grep -E "^[; ]*post_max_size" "$php_ini" | awk '{print $3}')
+    echo "upload_max_filesize: ${current_upload_size:-未设置}"
+    echo "post_max_size: ${current_post_size:-未设置}"
+    echo
+    read -p "请输入新的 upload_max_filesize（例如 50M）: " new_upload_size
+    read -p "请输入新的 post_max_size（建议不小于 upload_max_filesize，例如 50M）: " new_post_size
+
+    # 设置 upload_max_filesize
+    if grep -Eq "^[; ]*upload_max_filesize" "$php_ini"; then
+        sed -i "s/^[; ]*upload_max_filesize\s*=.*/upload_max_filesize = $new_upload_size/" "$php_ini"
+    else
+        echo "upload_max_filesize = $new_upload_size" >> "$php_ini"
+    fi
+
+    # 设置 post_max_size
+    if grep -Eq "^[; ]*post_max_size" "$php_ini"; then
+        sed -i "s/^[; ]*post_max_size\s*=.*/post_max_size = $new_post_size/" "$php_ini"
+    else
+        echo "post_max_size = $new_post_size" >> "$php_ini"
+    fi
+
+    echo "已将 upload_max_filesize 设置为 $new_upload_size，将 post_max_size 设置为 $new_post_size。"
+    restart_php_fpm "$version"
 }
 
 # 安装 PHP 扩展
@@ -337,7 +375,6 @@ disable_php_functions() {
                 echo "disable_functions = $func_trimmed" >> "$php_ini"
             fi
             echo "函数 $func_trimmed 已被禁用。"
-            # 更新当前禁用的函数变量
             current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ' | tr ',' ' ')
         fi
     done
@@ -373,10 +410,8 @@ enable_php_functions() {
     for func in "${functions[@]}"; do
         func_trimmed=$(echo "$func" | xargs) # 去除空格
         if echo "$current_disabled" | grep -qw "$func_trimmed"; then
-            # Remove the function from the disable_functions list
             new_disabled=$(echo "$current_disabled" | sed "s/\b$func_trimmed\b//g" | sed 's/,,/,/g' | sed 's/^,//' | sed 's/,$//')
             if [[ -z "$new_disabled" ]]; then
-                # 删除 disable_functions 行
                 sed -i "/^disable_functions\s*=/d" "$php_ini"
                 echo "函数 $func_trimmed 已被解除禁用。"
                 current_disabled=""
@@ -394,17 +429,15 @@ enable_php_functions() {
     restart_php_fpm "$version"
 }
 
-# 获取 PHP.ini 文件路径
+# 获取 PHP.ini 文件路径（强制使用 /etc/php/$version/fpm/php.ini）
 get_php_ini() {
     local version="$1"
-    # 尝试通过 php -i 获取 ini 文件路径
-    php_executable=$(which php"$version")
-    if [[ -z "$php_executable" ]]; then
+    local php_ini_path="/etc/php/$version/fpm/php.ini"
+    if [[ ! -f "$php_ini_path" ]]; then
         echo ""
-        return
+    else
+        echo "$php_ini_path"
     fi
-    php_ini_path=$("$php_executable" -i | grep "Loaded Configuration File" | awk '{print $5}')
-    echo "$php_ini_path"
 }
 
 # 重启 PHP-FPM 服务
@@ -441,7 +474,7 @@ uninstall_php_menu() {
     for i in "${!installed_versions[@]}"; do
         echo "$((i+1)). PHP ${installed_versions[i]}"
     done
-    echo "$(( ${#installed_versions[@]} +1 ))). 返回主菜单"
+    echo "$(( ${#installed_versions[@]} +1 )). 返回主菜单"
     read -p "请选择要卸载的 PHP 版本: " sel
     if [[ "$sel" -ge 1 && "$sel" -le "${#installed_versions[@]}" ]]; then
         version="${installed_versions[$((sel-1))]}"
