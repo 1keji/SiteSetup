@@ -599,7 +599,14 @@ function manage_mysql_images() {
 function main_menu() {
     while true
     do
-        echo "================ MySQL 管理脚本 ================"
+        echo "╔═══════════════════════════════════════════════╗"
+        echo "║           一点科技 mysql 管理脚本             ║"
+        echo "╠═══════════════════════════════════════════════╣"
+        echo "║ 作者：1点科技                                 ║"
+        echo "║ 网站：https://1keji.net                       ║"
+        echo "║ YouTube：https://www.youtube.com/@1keji_net   ║"
+        echo "╚═══════════════════════════════════════════════╝"
+        echo "==============================================="
         echo "1. 安装 MySQL"
         echo "2. 添加数据库"
         echo "3. 管理数据库"
