@@ -337,17 +337,61 @@ EOF
   echo "网站配置完成！你的网站现在可以通过 https://$DOMAIN 访问。"
 }
 
+# 选择网站的辅助函数
+select_website() {
+  local websites=($(ls /etc/nginx/sites-available/))
+  local count=${#websites[@]}
+
+  if [ $count -eq 0 ]; then
+    echo "没有配置的网站。"
+    return 1
+  fi
+
+  echo "可用的网站列表："
+  for i in "${!websites[@]}"; do
+    printf "%d. %s\n" $((i+1)) "${websites[$i]}"
+  done
+
+  while true; do
+    read -p "请输入要选择的网站编号 [1-$count]: " selection
+    if [[ $selection =~ ^[1-9][0-9]*$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "$count" ]; then
+      SELECTED_WEBSITE="${websites[$((selection-1))]}"
+      break
+    else
+      echo "无效的选择，请输入一个介于 1 到 $count 之间的数字。"
+    fi
+  done
+
+  echo "已选择网站：$SELECTED_WEBSITE"
+
+  CONFIG_PATH="/etc/nginx/sites-available/$SELECTED_WEBSITE"
+
+  # 获取根目录路径
+  DOCUMENT_ROOT=$(grep -E '^\s*root\s+' "$CONFIG_PATH" | awk '{print $2}' | tr -d ';')
+
+  if [ -z "$DOCUMENT_ROOT" ]; then
+    echo "无法找到网站根目录路径。"
+    return 1
+  fi
+
+  echo "当前根目录路径：$DOCUMENT_ROOT"
+  echo "目录中的文件夹："
+  ls -d "$DOCUMENT_ROOT"/*/ 2>/dev/null || echo "没有子文件夹。"
+
+  return 0
+}
+
 # 修改网站配置
 modify_website() {
-  echo "当前配置列表："
-  ls /etc/nginx/sites-available/
-  read -p "请输入要修改的域名（配置文件名）： " DOMAIN
+  if ! select_website; then
+    return
+  fi
 
-  CONFIG_PATH="/etc/nginx/sites-available/$DOMAIN"
-  ENABLED_PATH="/etc/nginx/sites-enabled/$DOMAIN"
+  CONFIG_PATH="/etc/nginx/sites-available/$SELECTED_WEBSITE"
+  ENABLED_PATH="/etc/nginx/sites-enabled/$SELECTED_WEBSITE"
 
   if [ ! -f "$CONFIG_PATH" ]; then
-    echo "配置文件 $DOMAIN 不存在。"
+    echo "配置文件 $SELECTED_WEBSITE 不存在。"
     return
   fi
 
@@ -358,8 +402,10 @@ modify_website() {
   echo "3. 目录服务的根目录路径"
   echo "4. PHP版本"
   echo "5. TLS设置"
-  echo "6. 指定运行目录"
-  read -p "请输入选项 [1-6]: " modify_choice
+  echo "6. 设置网站目录权限"
+  echo "7. 指定网站运行目录"
+  echo "0. 返回主菜单"
+  read -p "请输入选项 [0-7]: " modify_choice
 
   case $modify_choice in
     1)
@@ -385,7 +431,7 @@ modify_website() {
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN;
+    server_name $SELECTED_WEBSITE;
 
     location / {
         proxy_pass $NEW_TARGET;
@@ -447,7 +493,7 @@ EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN;
+    server_name $SELECTED_WEBSITE;
 
     root $NEW_DOCUMENT_ROOT;
     index index.php index.html index.htm;
@@ -471,7 +517,7 @@ EOF
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN;
+    server_name $SELECTED_WEBSITE;
 
     root $NEW_DOCUMENT_ROOT;
     index index.html index.htm;
@@ -548,7 +594,7 @@ EOF
       read -p "是否要更新TLS证书？ (y/n): " tls_choice
       if [[ "$tls_choice" == "y" || "$tls_choice" == "Y" ]]; then
         read -p "请输入用于 TLS 证书的邮箱地址： " EMAIL
-        certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL" --redirect
+        certbot --nginx -d "$SELECTED_WEBSITE" --non-interactive --agree-tos -m "$EMAIL" --redirect
         if [ $? -ne 0 ]; then
             echo "Certbot 申请证书失败。请检查域名的 DNS 设置是否正确。"
             return
@@ -559,34 +605,67 @@ EOF
       fi
       ;;
     6)
-      # 指定运行目录
-      if grep -q "root " "$CONFIG_PATH"; then
-        read -p "请输入新的运行目录子文件夹（相对于网站根目录，例如 'app'）： " SUB_DIR
-        NEW_RUNNING_DIR="$DOCUMENT_ROOT/$SUB_DIR"
-        mkdir -p "$NEW_RUNNING_DIR"
-        chown -R www-data:www-data "$NEW_RUNNING_DIR"
+      # 设置网站目录权限
+      echo "请选择操作："
+      echo "1. 临时更改目录权限为 777"
+      echo "2. 恢复目录权限为 755"
+      read -p "请输入选项 [1-2]: " perm_choice
 
-        # 更新Nginx配置
-        sed -i "s|root .*;|root $NEW_RUNNING_DIR;|" "$CONFIG_PATH"
+      case $perm_choice in
+        1)
+          echo "正在将 $DOCUMENT_ROOT 及其子目录权限更改为 777..."
+          chmod -R 777 "$DOCUMENT_ROOT"
+          if [ $? -eq 0 ]; then
+            echo "权限更改成功。"
+          else
+            echo "权限更改失败。"
+          fi
+          ;;
+        2)
+          echo "正在将 $DOCUMENT_ROOT 及其子目录权限恢复为 755..."
+          chmod -R 755 "$DOCUMENT_ROOT"
+          if [ $? -eq 0 ]; then
+            echo "权限恢复成功。"
+          else
+            echo "权限恢复失败。"
+          fi
+          ;;
+        *)
+          echo "无效的选项。"
+          ;;
+      esac
+      ;;
+    7)
+      # 指定网站运行目录
+      read -p "请输入新的运行目录子文件夹名称（相对于根目录，例如 'app'）： " SUB_DIR
 
-        echo "运行目录已更新为 $NEW_RUNNING_DIR。"
+      NEW_RUNNING_DIR="$DOCUMENT_ROOT/$SUB_DIR"
 
-        echo "测试 Nginx 配置..."
-        nginx -t
+      # 创建新的运行目录
+      mkdir -p "$NEW_RUNNING_DIR"
+      chown -R www-data:www-data "$NEW_RUNNING_DIR"
 
-        if [ $? -ne 0 ]; then
-            echo "Nginx 配置测试失败，请检查配置文件。"
-            return
-        fi
+      # 更新Nginx配置
+      sed -i "s|root .*;|root $NEW_RUNNING_DIR;|" "$CONFIG_PATH"
 
-        echo "重新加载 Nginx..."
-        systemctl reload nginx
+      echo "运行目录已更新为 $NEW_RUNNING_DIR。"
 
-        echo "运行目录修改完成！"
-      else
-        echo "当前不是目录服务配置。"
-        return
+      echo "测试 Nginx 配置..."
+      nginx -t
+
+      if [ $? -ne 0 ]; then
+          echo "Nginx 配置测试失败，请检查配置文件。"
+          return
       fi
+
+      echo "重新加载 Nginx..."
+      systemctl reload nginx
+
+      echo "运行目录指定完成！你的网站现在可以通过 https://$SELECTED_WEBSITE 访问。"
+      ;;
+    0)
+      echo "返回主菜单。"
+      return
       ;;
     *)
       echo "无效的选项。"
@@ -605,111 +684,11 @@ EOF
   echo "重新加载 Nginx..."
   systemctl reload nginx
 
-  echo "配置修改完成！你的网站现在可以通过 https://$DOMAIN 访问。"
+  echo "配置修改完成！你的网站现在可以通过 https://$SELECTED_WEBSITE 访问。"
 }
 
-# 设置网站目录权限
-set_directory_permissions() {
-  echo "可用的网站列表："
-  ls /etc/nginx/sites-available/
-  read -p "请输入要设置权限的域名（配置文件名）： " DOMAIN
-
-  CONFIG_PATH="/etc/nginx/sites-available/$DOMAIN"
-
-  if [ ! -f "$CONFIG_PATH" ]; then
-    echo "配置文件 $DOMAIN 不存在。"
-    return
-  fi
-
-  # 获取根目录路径
-  DOCUMENT_ROOT=$(grep -E '^\s*root\s+' "$CONFIG_PATH" | awk '{print $2}' | tr -d ';')
-
-  if [ -z "$DOCUMENT_ROOT" ]; then
-    echo "无法找到网站根目录路径。"
-    return
-  fi
-
-  echo "当前根目录路径：$DOCUMENT_ROOT"
-
-  echo "请选择操作："
-  echo "1. 临时更改目录权限为 777"
-  echo "2. 恢复目录权限为 755"
-  read -p "请输入选项 [1-2]: " perm_choice
-
-  case $perm_choice in
-    1)
-      echo "正在将 $DOCUMENT_ROOT 及其子目录权限更改为 777..."
-      chmod -R 777 "$DOCUMENT_ROOT"
-      if [ $? -eq 0 ]; then
-        echo "权限更改成功。"
-      else
-        echo "权限更改失败。"
-      fi
-      ;;
-    2)
-      echo "正在将 $DOCUMENT_ROOT 及其子目录权限恢复为 755..."
-      chmod -R 755 "$DOCUMENT_ROOT"
-      if [ $? -eq 0 ]; then
-        echo "权限恢复成功。"
-      else
-        echo "权限恢复失败。"
-      fi
-      ;;
-    *)
-      echo "无效的选项。"
-      ;;
-  esac
-}
-
-# 指定网站运行目录
-specify_running_directory() {
-  echo "可用的网站列表："
-  ls /etc/nginx/sites-available/
-  read -p "请输入要指定运行目录的域名（配置文件名）： " DOMAIN
-
-  CONFIG_PATH="/etc/nginx/sites-available/$DOMAIN"
-
-  if [ ! -f "$CONFIG_PATH" ]; then
-    echo "配置文件 $DOMAIN 不存在。"
-    return
-  fi
-
-  # 获取根目录路径
-  DOCUMENT_ROOT=$(grep -E '^\s*root\s+' "$CONFIG_PATH" | awk '{print $2}' | tr -d ';')
-
-  if [ -z "$DOCUMENT_ROOT" ]; then
-    echo "无法找到网站根目录路径。"
-    return
-  fi
-
-  echo "当前根目录路径：$DOCUMENT_ROOT"
-
-  read -p "请输入新的运行目录子文件夹名称（相对于根目录，例如 'app'）： " SUB_DIR
-
-  NEW_RUNNING_DIR="$DOCUMENT_ROOT/$SUB_DIR"
-
-  # 创建新的运行目录
-  mkdir -p "$NEW_RUNNING_DIR"
-  chown -R www-data:www-data "$NEW_RUNNING_DIR"
-
-  # 更新Nginx配置
-  sed -i "s|root .*;|root $NEW_RUNNING_DIR;|" "$CONFIG_PATH"
-
-  echo "运行目录已更新为 $NEW_RUNNING_DIR。"
-
-  echo "测试 Nginx 配置..."
-  nginx -t
-
-  if [ $? -ne 0 ]; then
-      echo "Nginx 配置测试失败，请检查配置文件。"
-      return
-  fi
-
-  echo "重新加载 Nginx..."
-  systemctl reload nginx
-
-  echo "运行目录指定完成！你的网站现在可以通过 https://$DOMAIN 访问。"
-}
+# 设置网站目录权限（已整合到 modify_website 中）
+# specify_running_directory 也已整合到 modify_website 中
 
 # 卸载Nginx及相关配置
 uninstall_nginx() {
@@ -791,129 +770,24 @@ uninstall_nginx() {
   esac
 }
 
-# 设置网站目录权限
-set_directory_permissions() {
-  echo "可用的网站列表："
-  ls /etc/nginx/sites-available/
-  read -p "请输入要设置权限的域名（配置文件名）： " DOMAIN
-
-  CONFIG_PATH="/etc/nginx/sites-available/$DOMAIN"
-
-  if [ ! -f "$CONFIG_PATH" ]; then
-    echo "配置文件 $DOMAIN 不存在。"
-    return
-  fi
-
-  # 获取根目录路径
-  DOCUMENT_ROOT=$(grep -E '^\s*root\s+' "$CONFIG_PATH" | awk '{print $2}' | tr -d ';')
-
-  if [ -z "$DOCUMENT_ROOT" ]; then
-    echo "无法找到网站根目录路径。"
-    return
-  fi
-
-  echo "当前根目录路径：$DOCUMENT_ROOT"
-
-  echo "请选择操作："
-  echo "1. 临时更改目录权限为 777"
-  echo "2. 恢复目录权限为 755"
-  read -p "请输入选项 [1-2]: " perm_choice
-
-  case $perm_choice in
-    1)
-      echo "正在将 $DOCUMENT_ROOT 及其子目录权限更改为 777..."
-      chmod -R 777 "$DOCUMENT_ROOT"
-      if [ $? -eq 0 ]; then
-        echo "权限更改成功。"
-      else
-        echo "权限更改失败。"
-      fi
-      ;;
-    2)
-      echo "正在将 $DOCUMENT_ROOT 及其子目录权限恢复为 755..."
-      chmod -R 755 "$DOCUMENT_ROOT"
-      if [ $? -eq 0 ]; then
-        echo "权限恢复成功。"
-      else
-        echo "权限恢复失败。"
-      fi
-      ;;
-    *)
-      echo "无效的选项。"
-      ;;
-  esac
-}
-
-# 指定网站运行目录
-specify_running_directory() {
-  echo "可用的网站列表："
-  ls /etc/nginx/sites-available/
-  read -p "请输入要指定运行目录的域名（配置文件名）： " DOMAIN
-
-  CONFIG_PATH="/etc/nginx/sites-available/$DOMAIN"
-
-  if [ ! -f "$CONFIG_PATH" ]; then
-    echo "配置文件 $DOMAIN 不存在。"
-    return
-  fi
-
-  # 获取根目录路径
-  DOCUMENT_ROOT=$(grep -E '^\s*root\s+' "$CONFIG_PATH" | awk '{print $2}' | tr -d ';')
-
-  if [ -z "$DOCUMENT_ROOT" ]; then
-    echo "无法找到网站根目录路径。"
-    return
-  fi
-
-  echo "当前根目录路径：$DOCUMENT_ROOT"
-
-  read -p "请输入新的运行目录子文件夹名称（相对于根目录，例如 'app'）： " SUB_DIR
-
-  NEW_RUNNING_DIR="$DOCUMENT_ROOT/$SUB_DIR"
-
-  # 创建新的运行目录
-  mkdir -p "$NEW_RUNNING_DIR"
-  chown -R www-data:www-data "$NEW_RUNNING_DIR"
-
-  # 更新Nginx配置
-  sed -i "s|root .*;|root $NEW_RUNNING_DIR;|" "$CONFIG_PATH"
-
-  echo "运行目录已更新为 $NEW_RUNNING_DIR。"
-
-  echo "测试 Nginx 配置..."
-  nginx -t
-
-  if [ $? -ne 0 ]; then
-      echo "Nginx 配置测试失败，请检查配置文件。"
-      return
-  fi
-
-  echo "重新加载 Nginx..."
-  systemctl reload nginx
-
-  echo "运行目录指定完成！你的网站现在可以通过 https://$DOMAIN 访问。"
-}
-
 # 显示菜单
 while true; do
-  echo "╔════════════════════════════════╗"
-  echo "║           一点科技 Nginx 管理脚本          ║"
-  echo "╠════════════════════════════════╣"
-  echo "║ 作者：1点科技                     ║"
-  echo "║ 网站：https://1keji.net           ║"
-  echo "║ YouTube：https://www.youtube.com/@1keji_net ║"
-  echo "╚════════════════════════════════╝"
+  echo "╔═══════════════════════════════════════════════╗"
+  echo "║           一点科技 Nginx 管理脚本             ║"
+  echo "╠═══════════════════════════════════════════════╣"
+  echo "║ 作者：1点科技                                 ║"
+  echo "║ 网站：https://1keji.net                       ║"
+  echo "║ YouTube：https://www.youtube.com/@1keji_net   ║"
+  echo "╚═══════════════════════════════════════════════╝"
   echo "=================================="
   echo "1. 安装 Nginx"
   echo "2. 添加网站配置"
   echo "3. 修改网站配置"
   echo "4. 配置反向代理"
   echo "5. 卸载 Nginx 和所有配置"
-  echo "6. 设置网站目录权限"
-  echo "7. 指定网站运行目录"
   echo "0. 退出"
   echo "=================================="
-  read -p "请选择一个选项 [0-7]: " choice
+  read -p "请选择一个选项 [0-5]: " choice
 
   case $choice in
     1)
@@ -930,12 +804,6 @@ while true; do
       ;;
     5)
       uninstall_nginx
-      ;;
-    6)
-      set_directory_permissions
-      ;;
-    7)
-      specify_running_directory
       ;;
     0)
       echo "退出脚本。"
