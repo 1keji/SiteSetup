@@ -141,6 +141,80 @@ uninstall_app() {
     fi
 }
 
+# 查询指定应用
+query_app() {
+    read -p "请输入要查询的应用名称： " app
+    if grep -qw "$app" "$INSTALLED_APPS_FILE"; then
+        echo "应用 '$app' 已安装。请选择操作："
+        echo "1. 更新应用"
+        echo "2. 卸载应用"
+        echo "0. 返回上级目录"
+        read -p "请输入您的选择：" q_choice
+        case "$q_choice" in
+            1)
+                echo "正在升级 '$app'..."
+                case "$PM" in
+                    apt)
+                        sudo apt-get update
+                        sudo apt-get install --only-upgrade -y "$app"
+                        ;;
+                    yum)
+                        sudo yum update -y "$app"
+                        ;;
+                    dnf)
+                        sudo dnf upgrade -y "$app"
+                        ;;
+                    pacman)
+                        sudo pacman -Syu --noconfirm "$app"
+                        ;;
+                    *)
+                        echo "不支持的包管理器。"
+                        ;;
+                esac
+                if [ $? -eq 0 ]; then
+                    echo "应用 '$app' 升级成功。"
+                else
+                    echo "应用 '$app' 升级失败。"
+                fi
+                ;;
+            2)
+                echo "正在卸载 '$app'..."
+                case "$PM" in
+                    apt)
+                        sudo apt-get remove -y "$app"
+                        ;;
+                    yum)
+                        sudo yum remove -y "$app"
+                        ;;
+                    dnf)
+                        sudo dnf remove -y "$app"
+                        ;;
+                    pacman)
+                        sudo pacman -Rns --noconfirm "$app"
+                        ;;
+                    *)
+                        echo "不支持的包管理器。"
+                        ;;
+                esac
+                if [ $? -eq 0 ]; then
+                    grep -vw "$app" "$INSTALLED_APPS_FILE" > "${INSTALLED_APPS_FILE}.tmp"
+                    mv "${INSTALLED_APPS_FILE}.tmp" "$INSTALLED_APPS_FILE"
+                    echo "应用 '$app' 卸载成功。"
+                else
+                    echo "应用 '$app' 卸载失败。"
+                fi
+                ;;
+            0)
+                ;;
+            *)
+                echo "无效的选择，请重新输入。"
+                ;;
+        esac
+    else
+        echo "应用 '$app' 未安装。"
+    fi
+}
+
 # 升级系统
 upgrade_system() {
     echo "开始升级系统..."
@@ -176,6 +250,7 @@ manage_apps() {
         echo "1. 查看已安装应用"
         echo "2. 升级应用"
         echo "3. 卸载应用"
+        echo "4. 查询指定应用"
         echo "0. 返回主菜单"
         read -p "请输入您的选择：" choice
         case "$choice" in
@@ -187,6 +262,9 @@ manage_apps() {
                 ;;
             3)
                 uninstall_app
+                ;;
+            4)
+                query_app
                 ;;
             0)
                 break
