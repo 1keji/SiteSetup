@@ -24,37 +24,66 @@ detect_package_manager() {
     fi
 }
 
+# 将包名转换为小写
+to_lowercase() {
+    echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# 验证包是否存在
+check_package_exists() {
+    local pkg="$1"
+    case "$PM" in
+        apt)
+            apt-cache show "$pkg" &> /dev/null
+            ;;
+        yum|dnf)
+            yum list available "$pkg" &> /dev/null || dnf list available "$pkg" &> /dev/null
+            ;;
+        pacman)
+            pacman -Si "$pkg" &> /dev/null
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # 安装应用
 install_apps() {
     read -p "请输入需要安装的应用名称，用逗号分隔： " apps_input
     IFS=',' read -ra APPS <<< "$apps_input"
     for app in "${APPS[@]}"; do
         app=$(echo "$app" | xargs) # 去除空格
-        if grep -qw "$app" "$INSTALLED_APPS_FILE"; then
+        app_lower=$(to_lowercase "$app")
+        if grep -qw "$app_lower" "$INSTALLED_APPS_FILE"; then
             echo "应用 '$app' 已经安装。"
+            continue
+        fi
+        if ! check_package_exists "$app_lower"; then
+            echo "包 '$app' 不存在或无法找到。请检查包名是否正确。"
             continue
         fi
         echo "正在安装 '$app'..."
         case "$PM" in
             apt)
                 sudo apt-get update
-                sudo apt-get install -y "$app"
+                sudo apt-get install -y "$app_lower"
                 ;;
             yum)
-                sudo yum install -y "$app"
+                sudo yum install -y "$app_lower"
                 ;;
             dnf)
-                sudo dnf install -y "$app"
+                sudo dnf install -y "$app_lower"
                 ;;
             pacman)
-                sudo pacman -Sy --noconfirm "$app"
+                sudo pacman -Sy --noconfirm "$app_lower"
                 ;;
             *)
                 echo "不支持的包管理器。"
                 ;;
         esac
         if [ $? -eq 0 ]; then
-            echo "$app" >> "$INSTALLED_APPS_FILE"
+            echo "$app_lower" >> "$INSTALLED_APPS_FILE"
             echo "应用 '$app' 安装成功。"
         else
             echo "应用 '$app' 安装失败。"
@@ -76,7 +105,8 @@ view_installed_apps() {
 upgrade_app() {
     view_installed_apps
     read -p "请输入需要升级的应用名称： " app
-    if ! grep -qw "$app" "$INSTALLED_APPS_FILE"; then
+    app_lower=$(to_lowercase "$app")
+    if ! grep -qw "$app_lower" "$INSTALLED_APPS_FILE"; then
         echo "应用 '$app' 不在已安装列表中。"
         return
     fi
@@ -84,16 +114,16 @@ upgrade_app() {
     case "$PM" in
         apt)
             sudo apt-get update
-            sudo apt-get install --only-upgrade -y "$app"
+            sudo apt-get install --only-upgrade -y "$app_lower"
             ;;
         yum)
-            sudo yum update -y "$app"
+            sudo yum update -y "$app_lower"
             ;;
         dnf)
-            sudo dnf upgrade -y "$app"
+            sudo dnf upgrade -y "$app_lower"
             ;;
         pacman)
-            sudo pacman -Syu --noconfirm "$app"
+            sudo pacman -Syu --noconfirm "$app_lower"
             ;;
         *)
             echo "不支持的包管理器。"
@@ -110,30 +140,31 @@ upgrade_app() {
 uninstall_app() {
     view_installed_apps
     read -p "请输入需要卸载的应用名称： " app
-    if ! grep -qw "$app" "$INSTALLED_APPS_FILE"; then
+    app_lower=$(to_lowercase "$app")
+    if ! grep -qw "$app_lower" "$INSTALLED_APPS_FILE"; then
         echo "应用 '$app' 不在已安装列表中。"
         return
     fi
     echo "正在卸载 '$app'..."
     case "$PM" in
         apt)
-            sudo apt-get remove -y "$app"
+            sudo apt-get remove -y "$app_lower"
             ;;
         yum)
-            sudo yum remove -y "$app"
+            sudo yum remove -y "$app_lower"
             ;;
         dnf)
-            sudo dnf remove -y "$app"
+            sudo dnf remove -y "$app_lower"
             ;;
         pacman)
-            sudo pacman -Rns --noconfirm "$app"
+            sudo pacman -Rns --noconfirm "$app_lower"
             ;;
         *)
             echo "不支持的包管理器。"
             ;;
     esac
     if [ $? -eq 0 ]; then
-        grep -vw "$app" "$INSTALLED_APPS_FILE" > "${INSTALLED_APPS_FILE}.tmp"
+        grep -vw "$app_lower" "$INSTALLED_APPS_FILE" > "${INSTALLED_APPS_FILE}.tmp"
         mv "${INSTALLED_APPS_FILE}.tmp" "$INSTALLED_APPS_FILE"
         echo "应用 '$app' 卸载成功。"
     else
@@ -144,7 +175,8 @@ uninstall_app() {
 # 查询指定应用
 query_app() {
     read -p "请输入要查询的应用名称： " app
-    if grep -qw "$app" "$INSTALLED_APPS_FILE"; then
+    app_lower=$(to_lowercase "$app")
+    if grep -qw "$app_lower" "$INSTALLED_APPS_FILE"; then
         echo "应用 '$app' 已安装。请选择操作："
         echo "1. 更新应用"
         echo "2. 卸载应用"
@@ -156,16 +188,16 @@ query_app() {
                 case "$PM" in
                     apt)
                         sudo apt-get update
-                        sudo apt-get install --only-upgrade -y "$app"
+                        sudo apt-get install --only-upgrade -y "$app_lower"
                         ;;
                     yum)
-                        sudo yum update -y "$app"
+                        sudo yum update -y "$app_lower"
                         ;;
                     dnf)
-                        sudo dnf upgrade -y "$app"
+                        sudo dnf upgrade -y "$app_lower"
                         ;;
                     pacman)
-                        sudo pacman -Syu --noconfirm "$app"
+                        sudo pacman -Syu --noconfirm "$app_lower"
                         ;;
                     *)
                         echo "不支持的包管理器。"
@@ -181,23 +213,23 @@ query_app() {
                 echo "正在卸载 '$app'..."
                 case "$PM" in
                     apt)
-                        sudo apt-get remove -y "$app"
+                        sudo apt-get remove -y "$app_lower"
                         ;;
                     yum)
-                        sudo yum remove -y "$app"
+                        sudo yum remove -y "$app_lower"
                         ;;
                     dnf)
-                        sudo dnf remove -y "$app"
+                        sudo dnf remove -y "$app_lower"
                         ;;
                     pacman)
-                        sudo pacman -Rns --noconfirm "$app"
+                        sudo pacman -Rns --noconfirm "$app_lower"
                         ;;
                     *)
                         echo "不支持的包管理器。"
                         ;;
                 esac
                 if [ $? -eq 0 ]; then
-                    grep -vw "$app" "$INSTALLED_APPS_FILE" > "${INSTALLED_APPS_FILE}.tmp"
+                    grep -vw "$app_lower" "$INSTALLED_APPS_FILE" > "${INSTALLED_APPS_FILE}.tmp"
                     mv "${INSTALLED_APPS_FILE}.tmp" "$INSTALLED_APPS_FILE"
                     echo "应用 '$app' 卸载成功。"
                 else
