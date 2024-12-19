@@ -130,7 +130,24 @@ install_php_menu() {
                 apt install -y php$version php$version-cli php$version-fpm
                 if [[ $? -eq 0 ]]; then
                     echo "PHP $version 安装成功。"
-                    disable_default_functions "$version"
+                    # 提示用户是否禁用高危函数
+                    while true; do
+                        read -p "是否要禁用高危函数? 默认禁用 [Y/n]: " disable_choice
+                        disable_choice=${disable_choice:-Y}
+                        case "$disable_choice" in
+                            Y|y)
+                                disable_default_functions "$version"
+                                break
+                                ;;
+                            N|n)
+                                echo "跳过禁用高危函数。"
+                                break
+                                ;;
+                            *)
+                                echo "无效的输入，请输入 Y 或 N。"
+                                ;;
+                        esac
+                    done
                 else
                     echo "PHP $version 安装失败。"
                 fi
@@ -153,22 +170,69 @@ disable_default_functions() {
         return
     fi
 
-    echo "正在禁用默认高危函数..."
+    echo "是否要自定义禁用高危函数? [Y/n]: "
+    read -p "是否要自定义禁用高危函数? [Y/n]: " custom_choice
+    custom_choice=${custom_choice:-N}
+
+    if [[ "$custom_choice" == "Y" || "$custom_choice" == "y" ]]; then
+        read -p "请输入要禁用的函数（用逗号分隔）: " user_functions
+        IFS=',' read -ra functions <<< "$user_functions"
+        disable_selected_functions "$version" "${functions[@]}"
+    else
+        echo "正在禁用默认高危函数..."
+        # 获取当前禁用的函数
+        current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ' | tr ',' ' ')
+    
+        for func in "${DEFAULT_DISABLED_FUNCTIONS[@]}"; do
+            if echo "$current_disabled" | grep -qw "$func"; then
+                echo "函数 $func 已经被禁用，跳过。"
+            else
+                if grep -q "^disable_functions" "$php_ini"; then
+                    # Append function
+                    sed -i "/^disable_functions\s*=/ s/$/,${func}/" "$php_ini"
+                else
+                    echo "disable_functions = ${func}" >> "$php_ini"
+                fi
+                echo "函数 $func 已被禁用。"
+                # Update current_disabled variable
+                current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ' | tr ',' ' ')
+            fi
+        done
+    
+        # 重启 PHP-FPM 服务
+        restart_php_fpm "$version"
+    fi
+}
+
+# 禁用指定的 PHP 函数
+disable_selected_functions() {
+    local version="$1"
+    shift
+    local functions=("$@")
+    local php_ini
+    php_ini=$(get_php_ini "$version")
+    if [[ -z "$php_ini" ]]; then
+        echo "未找到 PHP $version 的 php.ini 文件，无法禁用函数。"
+        return
+    fi
+
+    echo "正在禁用指定的高危函数..."
     
     # 获取当前禁用的函数
     current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ' | tr ',' ' ')
-
-    for func in "${DEFAULT_DISABLED_FUNCTIONS[@]}"; do
-        if echo "$current_disabled" | grep -qw "$func"; then
-            echo "函数 $func 已经被禁用，跳过。"
+    
+    for func in "${functions[@]}"; do
+        func_trimmed=$(echo "$func" | xargs) # 去除空格
+        if echo "$current_disabled" | grep -qw "$func_trimmed"; then
+            echo "函数 $func_trimmed 已经被禁用，跳过。"
         else
             if grep -q "^disable_functions" "$php_ini"; then
                 # Append function
-                sed -i "/^disable_functions\s*=/ s/$/,${func}/" "$php_ini"
+                sed -i "/^disable_functions\s*=/ s/$/,${func_trimmed}/" "$php_ini"
             else
-                echo "disable_functions = ${func}" >> "$php_ini"
+                echo "disable_functions = ${func_trimmed}" >> "$php_ini"
             fi
-            echo "函数 $func 已被禁用。"
+            echo "函数 $func_trimmed 已被禁用。"
             # Update current_disabled variable
             current_disabled=$(grep -i "^disable_functions" "$php_ini" | cut -d'=' -f2 | tr -d ' ' | tr ',' ' ')
         fi
