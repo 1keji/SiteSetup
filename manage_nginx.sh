@@ -84,7 +84,10 @@ configure_firewall() {
 detect_installed_php_versions() {
   echo "检测已安装的PHP版本..."
   INSTALLED_PHP_VERSIONS=()
-  for version in $(ls /etc/init.d/ | grep php | awk -F 'php' '{print $2}' | awk -F '-fpm' '{print $1}'); do
+  
+  # 使用 systemctl 检测已安装的 PHP-FPM 服务
+  for service in $(systemctl list-units --type=service --all | grep 'php.*-fpm.service' | awk '{print $1}'); do
+    version=$(echo "$service" | grep -oP '(?<=php)\d+\.\d+(?=-fpm)')
     if [[ $version =~ ^[0-9]+\.[0-9]+$ ]]; then
       INSTALLED_PHP_VERSIONS+=("$version")
     fi
@@ -172,9 +175,9 @@ configure_reverse_proxy() {
 
   read -p "请输入反向代理的目标地址（例如 http://localhost:3000 或 https://localhost:3000）： " TARGET
 
-  # 设置上传文件大小
-  read -p "请输入允许上传文件的最大大小（例如 10M，默认 50M）： " UPLOAD_SIZE
-  UPLOAD_SIZE=${UPLOAD_SIZE:-50M}
+  # 设置上传文件大小，默认2M
+  read -p "请输入允许上传文件的最大大小（例如 10M，默认 2M）： " UPLOAD_SIZE
+  UPLOAD_SIZE=${UPLOAD_SIZE:-2M}
 
   CONFIG_PATH="/etc/nginx/sites-available/$DOMAIN"
   ENABLED_PATH="/etc/nginx/sites-enabled/$DOMAIN"
@@ -250,9 +253,9 @@ add_website() {
   read -p "请输入网站的根目录路径（默认 /var/www/$DOMAIN/html）： " DOCUMENT_ROOT
   DOCUMENT_ROOT=${DOCUMENT_ROOT:-"/var/www/$DOMAIN/html"}
 
-  # 设置上传文件大小
-  read -p "请输入允许上传文件的最大大小（例如 10M，默认 50M）： " UPLOAD_SIZE
-  UPLOAD_SIZE=${UPLOAD_SIZE:-50M}
+  # 设置上传文件大小，默认2M
+  read -p "请输入允许上传文件的最大大小（例如 10M，默认 2M）： " UPLOAD_SIZE
+  UPLOAD_SIZE=${UPLOAD_SIZE:-2M}
 
   echo "检测已安装的PHP版本..."
   detect_installed_php_versions
@@ -474,9 +477,9 @@ modify_website() {
           read -p "请输入新的反向代理的目标地址（例如 http://localhost:3000）： " NEW_TARGET
           read -p "请输入用于 TLS 证书的邮箱地址： " EMAIL
 
-          # 设置上传文件大小
-          read -p "请输入允许上传文件的最大大小（例如 10M，默认 50M）： " NEW_UPLOAD_SIZE
-          NEW_UPLOAD_SIZE=${NEW_UPLOAD_SIZE:-50M}
+          # 设置上传文件大小，默认2M
+          read -p "请输入允许上传文件的最大大小（例如 10M，默认 2M）： " NEW_UPLOAD_SIZE
+          NEW_UPLOAD_SIZE=${NEW_UPLOAD_SIZE:-2M}
 
           # 重写配置
           cat > "$CONFIG_PATH" <<EOF
@@ -536,9 +539,9 @@ EOF
             done
           fi
 
-          # 设置上传文件大小
-          read -p "请输入允许上传文件的最大大小（例如 10M，默认 50M）： " NEW_UPLOAD_SIZE
-          NEW_UPLOAD_SIZE=${NEW_UPLOAD_SIZE:-50M}
+          # 设置上传文件大小，默认2M
+          read -p "请输入允许上传文件的最大大小（例如 10M，默认 2M）： " NEW_UPLOAD_SIZE
+          NEW_UPLOAD_SIZE=${NEW_UPLOAD_SIZE:-2M}
 
           if [ -n "$NEW_PHP_VERSION" ]; then
             install_php "$NEW_PHP_VERSION"
@@ -625,7 +628,8 @@ EOF
       # 修改PHP版本
       if grep -q "fastcgi_pass" "$CONFIG_PATH"; then
         echo "当前使用的PHP版本："
-        current_php=$(grep "fastcgi_pass" "$CONFIG_PATH" | awk -F'php' '{print $2}' | awk -F'-fpm' '{print $1}')
+        # 使用更精准的正则表达式提取PHP版本
+        current_php=$(grep "fastcgi_pass" "$CONFIG_PATH" | grep -oP 'php\K[0-9.]+(?=-fpm.sock)')
         echo "$current_php"
         echo "请选择新的PHP版本："
         detect_installed_php_versions
@@ -645,7 +649,15 @@ EOF
           echo "PHP安装失败，无法继续修改。"
           return
         fi
-        sed -i "s|fastcgi_pass unix:/var/run/php/php.*-fpm.sock;|fastcgi_pass unix:/var/run/php/php$NEW_PHP_VERSION-fpm.sock;|" "$CONFIG_PATH"
+        # 精确匹配并替换fastcgi_pass指令
+        sed -i "s|fastcgi_pass unix:/var/run/php/php[0-9.]\+-fpm.sock;|fastcgi_pass unix:/var/run/php/php$NEW_PHP_VERSION-fpm.sock;|" "$CONFIG_PATH"
+        # 检查替换是否成功
+        updated_php=$(grep "fastcgi_pass" "$CONFIG_PATH" | grep -oP 'php\K[0-9.]+(?=-fpm.sock)')
+        if [[ "$updated_php" != "$NEW_PHP_VERSION" ]]; then
+          echo "fastcgi_pass 指令替换失败。"
+          return
+        fi
+        echo "fastcgi_pass 已成功更新为 PHP $NEW_PHP_VERSION。"
       else
         echo "当前配置不使用PHP。"
         return
@@ -736,11 +748,9 @@ EOF
 
       # 检查是否已经存在 client_max_body_size 指令
       if grep -q '^\s*client_max_body_size\s\+' "$CONFIG_PATH"; then
-        # 使用 POSIX 字符类替代 \s
         sed -i "s|^[[:space:]]*client_max_body_size[[:space:]]\+.*;|    client_max_body_size $NEW_UPLOAD_SIZE;|" "$CONFIG_PATH"
         echo "已将允许上传文件的最大大小修改为 $NEW_UPLOAD_SIZE。"
       else
-        # 在 server 块的开头添加 client_max_body_size 指令
         sed -i "/server {/a \    client_max_body_size $NEW_UPLOAD_SIZE;" "$CONFIG_PATH"
         echo "已添加允许上传文件的最大大小为 $NEW_UPLOAD_SIZE。"
       fi
@@ -765,6 +775,17 @@ EOF
 
   echo "重新加载 Nginx..."
   systemctl reload nginx
+
+  # 重启相应的 PHP-FPM 服务以应用更改
+  if [ "$modify_choice" -eq 4 ] && [ -n "$NEW_PHP_VERSION" ]; then
+    echo "重启 PHP-FPM 服务..."
+    systemctl restart php$NEW_PHP_VERSION-fpm
+    if [ $? -ne 0 ]; then
+      echo "PHP-FPM 服务重启失败。请检查 PHP-FPM 服务状态。"
+      return
+    fi
+    echo "PHP-FPM 服务已重启。"
+  fi
 
   echo "配置修改完成！你的网站现在可以通过 https://$SELECTED_WEBSITE 访问。"
 }
@@ -794,7 +815,7 @@ uninstall_nginx() {
 
   # 检测并移除防火墙规则
   echo "移除防火墙中开放的端口..."
-  
+
   if command -v ufw >/dev/null 2>&1; then
     for port in "${REQUIRED_PORTS[@]}"; do
       if ufw status | grep -qw "$port"; then

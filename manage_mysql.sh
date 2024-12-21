@@ -45,6 +45,38 @@ function install_mysql() {
     read -p "请输入端口号（默认: 3306）: " port
     port=${port:-3306}
 
+    # 选择网络
+    echo "请选择要连接的 Docker 网络："
+    # 获取现有网络列表
+    existing_networks=$(docker network ls --format '{{.Name}}')
+    select network in $existing_networks "创建新网络" "取消"; do
+        if [[ "$network" == "取消" ]]; then
+            echo "操作已取消。"
+            return
+        elif [[ "$network" == "创建新网络" ]]; then
+            read -p "请输入新网络名称: " new_network
+            if [[ -z "$new_network" ]]; then
+                echo "未输入网络名称，操作已取消。"
+                return
+            fi
+            # 创建新网络
+            docker network create "$new_network"
+            if [ $? -eq 0 ]; then
+                echo "网络 '$new_network' 创建成功。"
+                selected_network="$new_network"
+                break
+            else
+                echo "创建网络失败。请重试。"
+                return
+            fi
+        elif [[ -n "$network" ]]; then
+            selected_network="$network"
+            break
+        else
+            echo "无效的选择，请重新选择。"
+        fi
+    done
+
     read -s -p "请输入 MySQL root 用户密码: " root_password
     echo
     if [[ -z "$root_password" ]]; then
@@ -68,10 +100,11 @@ function install_mysql() {
     -p ${port}:3306 \
     -e MYSQL_ROOT_PASSWORD=${root_password} \
     -v ${mount_path}:/var/lib/mysql \
+    --network "$selected_network" \
     mysql:${mysql_version}
 
     if [ $? -eq 0 ]; then
-        echo "MySQL ${mysql_version} 安装并运行成功。"
+        echo "MySQL ${mysql_version} 安装并运行成功，已连接到网络 '$selected_network'。"
     else
         echo "MySQL 安装失败。"
     fi
@@ -595,6 +628,68 @@ function manage_mysql_images() {
     esac
 }
 
+# 管理 Docker 网络
+function manage_mysql_network() {
+    echo "请选择网络管理操作："
+    echo "1. 查看所有 Docker 网络"
+    echo "2. 创建新网络"
+    echo "3. 删除网络"
+    echo "0. 返回主菜单"
+    read -p "选择: " network_choice
+
+    case $network_choice in
+        1)
+            echo "所有 Docker 网络："
+            docker network ls
+            ;;
+        2)
+            read -p "请输入要创建的网络名称: " new_network
+            if [[ -z "$new_network" ]]; then
+                echo "未输入网络名称，操作已取消。"
+                return
+            fi
+            read -p "请输入网络驱动类型（默认 bridge）: " network_driver
+            network_driver=${network_driver:-bridge}
+            docker network create --driver "$network_driver" "$new_network"
+            if [ $? -eq 0 ]; then
+                echo "网络 '$new_network' 创建成功。"
+            else
+                echo "创建网络失败。"
+            fi
+            ;;
+        3)
+            read -p "请输入要删除的网络名称: " del_network
+            if [[ -z "$del_network" ]]; then
+                echo "未输入网络名称，操作已取消。"
+                return
+            fi
+            # 检查网络是否存在
+            if ! docker network ls --format '{{.Name}}' | grep -wq "$del_network"; then
+                echo "网络 '$del_network' 不存在。"
+                return
+            fi
+            # 确认删除
+            read -p "确定要删除网络 '$del_network' 吗？输入 'y' 以确认: " confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                echo "确认失败，删除网络已取消。"
+                return
+            fi
+            docker network rm "$del_network"
+            if [ $? -eq 0 ]; then
+                echo "网络 '$del_network' 已成功删除。"
+            else
+                echo "删除网络失败。请确保没有容器连接到该网络。"
+            fi
+            ;;
+        0)
+            return
+            ;;
+        *)
+            echo "无效的选择。"
+            ;;
+    esac
+}
+
 # 主菜单
 function main_menu() {
     while true
@@ -612,6 +707,7 @@ function main_menu() {
         echo "3. 管理数据库"
         echo "4. 管理 MySQL 容器"
         echo "5. 管理 MySQL 镜像"
+        echo "6. 管理 Docker 网络"
         echo "0. 退出"
         echo "==============================================="
         read -p "请选择一个选项: " choice
@@ -630,6 +726,9 @@ function main_menu() {
                 ;;
             5)
                 manage_mysql_images
+                ;;
+            6)
+                manage_mysql_network
                 ;;
             0)
                 echo "退出脚本。"
